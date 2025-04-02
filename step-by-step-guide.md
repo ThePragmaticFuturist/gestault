@@ -1,7 +1,4 @@
-**Step-by-Step Annotated Guide**
-
-This guide explains the purpose of each major component as we built it.
-
+**Step-by-Step Annotated Guide to Building Your Own RAG LLM Server**
 1.  **Step 1: Basic Server Structure (FastAPI)**
     *   **What:** Set up a minimal FastAPI application (`app/main.py`) run by Uvicorn. Created a root endpoint (`/`).
     *   **Why:** To establish the core web server framework using a modern, high-performance, async-capable library. Provides basic API structure and automatic documentation (`/docs`).
