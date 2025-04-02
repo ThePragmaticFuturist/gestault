@@ -4,7 +4,7 @@
 
 
 
-![This diagram shows the main subsystems and their primary interactions.](instructions/system architecture.png)
+![This diagram shows the main subsystems and their primary interactions.](system_architecture.png)
 
 ```
 graph TD
