@@ -1,6 +1,11 @@
 # A Step-by-Step Annotated Guide to Building Your Own RAG LLM Server #  
 
-Here's a breakdown of the thought process behind generating the initial project structure and `main.py` for the RAG LLM server:
+> ### One Prompt SHall Rule Them ALL ###
+> You are an expert Python developer and Large Language Model server designer. I want to work with you to create a RAG LLM server one step at a time and learn along the way about how you are coding it. I want this server to provide an API for uploading, chunking, vector embedding, managing, and providing keyword and semantic search tools for RAG documents using sqlite and chromadb. The documents and text must be accessible by document IDs to avoid the need to send large text packets with prompts during chat sessions. For document processing use beautiful soup, python-dox, and docling. The server needs to be able to conduct threaded chat sessions and store the prompt and response exchange as RAG and vector embedding for long term search and recall during a session. Sessions must be stored with IDs, date and time information for the last prompt response, the LLM model used, the RAG document IDs if any, and a name for the session. Automatic meta-tagging of the session is applied for searching the list of stored sessions. The server must provide LLM model loading from the HuggingFace CLI and local models and provide a status for when the model is successfully or unsuccessfully loaded. It must provide a list of available local models. The server must provide a means of modifying the settings for the loaded LLM and confirmation when the settings are in place. The server must also provide system status of GPU and CPU, operating temperature if available, disk space, and amount of free RAM plus any other relevant data affecting the operational efficiency of the server. Please start the design and development with the most logical component and we will build each subsequent part of our RAG LLM server after we achieve success with the previous code.
+
+***
+
+*Here's a breakdown of the thought process behind generating the initial project structure and `main.py` for the RAG LLM server:*
 
 1.  **Deconstruct the Request:**
 
