@@ -79,6 +79,8 @@
 
 This structured approach ensures that the foundation is solid before adding more complex features.
 
+***
+
 **[Step A: Environment Setup](instructions/environment_setup_quickstart.md)**
 
 **[Step B: CUDA Environment Setup](instructions/cuda_environment_setup_guide.md)**
@@ -88,60 +90,65 @@ This structured approach ensures that the foundation is solid before adding more
 **[Step D: Glossary of Terms](instructions/glossary.md)**
 
 ***
+
+**[Step 0: Server Architecture Overview](instructions/rag_llm_server_architecture.md)**
+
+*   **What:** A high level overview of the architecture and data flow.
+*   **Why:** As we build out the system and its components, it is important to understand how all of the pieces work together.
     
 **[Step 1: Basic Server Structure (FastAPI)](instructions/step_01_basic_server_structure.md)**
 
-    *   What: Set up a minimal FastAPI application (`app/main.py`) run by Uvicorn. Created a root endpoint (`/`).
-    *   Why: To establish the core web server framework using a modern, high-performance, async-capable library. Provides basic API structure and automatic documentation (`/docs`).
+*   **What:** Set up a minimal FastAPI application (`app/main.py`) run by Uvicorn. Created a root endpoint (`/`).
+*   **Why:** To establish the core web server framework using a modern, high-performance, async-capable library. Provides basic API structure and automatic documentation (`/docs`).
 
 **[Step 2: Configuration & Database Initialization](instructions/step_02_configuration_and_database_init.md)**
 
-    *   **What:** Defined settings using Pydantic (`core/config.py`), set up SQLite table schemas using SQLAlchemy Core (`db/models.py`), initialized ChromaDB client, and managed database connections (`db/database.py`). Created data directories.
-    *   **Why:** Centralize configuration; define persistent storage for metadata (SQLite) and vectors (ChromaDB); ensure database connections are handled correctly during server startup/shutdown.
+*   **What:** Defined settings using Pydantic (`core/config.py`), set up SQLite table schemas using SQLAlchemy Core (`db/models.py`), initialized ChromaDB client, and managed database connections (`db/database.py`). Created data directories.
+*   **Why:** Centralize configuration; define persistent storage for metadata (SQLite) and vectors (ChromaDB); ensure database connections are handled correctly during server startup/shutdown.
 
 **[Step 3: Document Upload and Background Processing](instructions/step_03_document_upload_and_processing.md)**
 
-    *   **What:** Created API endpoints for file upload (`app/api/endpoints/documents.py`). Implemented file handling, text extraction (`services/document_processor.py` using `python-docx`, `pypdf`, `beautifulsoup4`), chunking (`langchain-text-splitters`), and initial SQLite record creation. Used FastAPI `BackgroundTasks` for processing.
-    *   **Why:** To allow users to ingest documents; handle different file types; break large documents into manageable chunks; offload time-consuming processing from the initial API request for better responsiveness.
+*   **What:** Created API endpoints for file upload (`app/api/endpoints/documents.py`). Implemented file handling, text extraction (`services/document_processor.py` using `python-docx`, `pypdf`, `beautifulsoup4`), chunking (`langchain-text-splitters`), and initial SQLite record creation. Used FastAPI `BackgroundTasks` for processing.
+*   **Why:** To allow users to ingest documents; handle different file types; break large documents into manageable chunks; offload time-consuming processing from the initial API request for better responsiveness.
 
 **[Step 4: Vector Embedding Integration](instructions/step_04_vector_embedding.md)**
 
-    *   **What:** Integrated `sentence-transformers` (`services/embedding_service.py`) to load an embedding model (pre-loaded on startup). Modified the background task to generate embeddings for chunks and store them, along with text and metadata, in ChromaDB. Updated document status in SQLite.
-    *   **Why:** To convert text chunks into numerical representations (vectors) suitable for semantic similarity search, enabling the core RAG functionality.
+*   **What:** Integrated `sentence-transformers` (`services/embedding_service.py`) to load an embedding model (pre-loaded on startup). Modified the background task to generate embeddings for chunks and store them, along with text and metadata, in ChromaDB. Updated document status in SQLite.
+*   **Why:** To convert text chunks into numerical representations (vectors) suitable for semantic similarity search, enabling the core RAG functionality.
 
 **[Step 5: Search Endpoints](instructions/step_05_search_endpoints.md)**
 
-    *   **What:** Added API endpoints for keyword search (using SQL `LIKE` against SQLite chunks) and semantic search (embedding the query and querying ChromaDB) within `app/api/endpoints/documents.py`.
-    *   **Why:** To provide tools for retrieving relevant document chunks based on user queries, forming the retrieval part of RAG.
+*   **What:** Added API endpoints for keyword search (using SQL `LIKE` against SQLite chunks) and semantic search (embedding the query and querying ChromaDB) within `app/api/endpoints/documents.py`.
+*   **Why:** To provide tools for retrieving relevant document chunks based on user queries, forming the retrieval part of RAG.
 
 **[Step 6: Chat Session and Message Management API](instructions/step_06_chat_session_and_management.md)**
 
-    *   **What:** Created API models (`app/api/models/chat.py`) and endpoints (`app/api/endpoints/sessions.py`) for managing chat sessions (CRUD) and messages (add/list). Stored session metadata and message history in SQLite tables (`sessions`, `chat_messages`).
-    *   **Why:** To maintain conversation state, link RAG documents to sessions, and store the prompt-response history needed for context and future interaction.
+*   **What:** Created API models (`app/api/models/chat.py`) and endpoints (`app/api/endpoints/sessions.py`) for managing chat sessions (CRUD) and messages (add/list). Stored session metadata and message history in SQLite tables (`sessions`, `chat_messages`).
+*   **Why:** To maintain conversation state, link RAG documents to sessions, and store the prompt-response history needed for context and future interaction.
 
 **[Step 7: Integrate RAG and Placeholder LLM Call](instructions/step_07_integrate_rag.md)**
 
-    *   **What:** Modified the "add message" endpoint to: fetch associated RAG documents, perform semantic search based on the user query, retrieve chat history, construct a detailed prompt (including context/history), simulate an LLM call, and store both user/assistant messages. Added context truncation logic. Added summarization step.
-    *   **Why:** To implement the full RAG loop within a chat context, assembling the necessary information before calling the LLM and handling context window limits. The placeholder simulates the final generation step.
+*   **What:** Modified the "add message" endpoint to: fetch associated RAG documents, perform semantic search based on the user query, retrieve chat history, construct a detailed prompt (including context/history), simulate an LLM call, and store both user/assistant messages. Added context truncation logic. Added summarization step.
+*   **Why:** To implement the full RAG loop within a chat context, assembling the necessary information before calling the LLM and handling context window limits. The placeholder simulates the final generation step.
 
 **[Step 8: LLM Loading and Management API](instructions/step_08_llm_loading_and_management.md)**
 
-    *   **What:** Introduced an abstraction layer (`services/llm_backends.py`) for different LLM backends (local, Ollama, vLLM). Refactored `services/llm_service.py` to manage the active backend. Created API endpoints (`app/api/endpoints/models.py`) to list available models, dynamically load/configure the active backend and model (via API request or config defaults), check status, and update generation parameters. Handled local model loading (including quantization via `bitsandbytes`) in background threads.
-    *   **Why:** To provide flexibility in choosing the LLM inference source without changing the core chat logic; manage the complex process of loading/unloading local models safely; allow runtime configuration.
+*   **What:** Introduced an abstraction layer (`services/llm_backends.py`) for different LLM backends (local, Ollama, vLLM). Refactored `services/llm_service.py` to manage the active backend. Created API endpoints (`app/api/endpoints/models.py`) to list available models, dynamically load/configure the active backend and model (via API request or config defaults), check status, and update generation parameters. Handled local model loading (including quantization via `bitsandbytes`) in background threads.
+*   **Why:** To provide flexibility in choosing the LLM inference source without changing the core chat logic; manage the complex process of loading/unloading local models safely; allow runtime configuration.
 
 **[Step 9: Real LLM Integration & Final Auth/Fixes](instructions/step_10_optional_external_llm_servers.md)**
 
-    *   **What:** Replaced the placeholder LLM call with a call to the active backend via `llm_service.generate_text`, ensuring blocking calls run in an executor. Added a startup check (`app/main.py`) for Hugging Face authentication (`huggingface_hub` token via env/`.env` or CLI cache). Debugged various errors related to argument passing, state access, and library interactions.
+*   **What:** Replaced the placeholder LLM call with a call to the active backend via `llm_service.generate_text`, ensuring blocking calls run in an executor. Added a startup check (`app/main.py`) for Hugging Face authentication (`huggingface_hub` token via env/`.env` or CLI cache). Debugged various errors related to argument passing, state access, and library interactions.
     *   **Why:** To connect the RAG pipeline to an actual LLM for response generation; ensure prerequisites for gated models are met; resolve runtime errors for a functional system.
 
 **[Step 10: System Status API](instructions/step_09_system_status_api.md)**
 
-    *   **What:** Created API endpoints (`app/api/endpoints/system.py`) and a service (`services/system_service.py`) using `psutil` and `pynvml` to report CPU, RAM, Disk, GPU (optional), and Temperature (optional) metrics. Added NVML shutdown to the FastAPI shutdown event.
-    *   **Why:** To provide visibility into the server's resource usage and operational health, aiding monitoring and debugging.
+*   **What:** Created API endpoints (`app/api/endpoints/system.py`) and a service (`services/system_service.py`) using `psutil` and `pynvml` to report CPU, RAM, Disk, GPU (optional), and Temperature (optional) metrics. Added NVML shutdown to the FastAPI shutdown event.
+*   **Why:** To provide visibility into the server's resource usage and operational health, aiding monitoring and debugging.
 
 **[Step 11: Optional - Validate HuggingFace Login Token for LLM Access ](instructions/step_11_optional_huggingface_token.md)**
 
-    *   **What:** Integrated validation of HuggingFace Token from either HuggingFace local cache or .env file (`app/api/endpoints/system.py`). 
-    *   **Why:** To simplify the process of accessing HuggingFace Hub private models that require token.
+*   **What:** Integrated validation of HuggingFace Token from either HuggingFace local cache or .env file (`app/api/endpoints/system.py`). 
+*   **Why:** To simplify the process of accessing HuggingFace Hub private models that require token.
 
 **[Citations and Additional References](instructions/citations_and_references.md)**
