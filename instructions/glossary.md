@@ -1,4 +1,4 @@
-**Glossary of Terms**
+# Glossary of Terms #
 
 *   **API (Application Programming Interface):** A set of rules and protocols allowing different software applications to communicate with each other. In our case, the way clients interact with the server (e.g., upload documents, start chats).
 *   **ASGI (Asynchronous Server Gateway Interface):** A standard interface between async-capable Python web servers (like Uvicorn) and async web frameworks (like FastAPI).
