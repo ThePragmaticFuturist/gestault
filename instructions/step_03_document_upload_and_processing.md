@@ -1,4 +1,4 @@
-**Step 3: Document Upload and Background Processing**
+# Step 3: Document Upload and Background Processing #
 
 1.  **Install New Dependencies:**
     We need libraries for handling different file formats and detecting file types. We'll also use LangChain's text splitter for convenience.
