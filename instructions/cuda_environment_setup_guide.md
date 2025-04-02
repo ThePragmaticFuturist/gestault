@@ -1,4 +1,4 @@
-**CUDA Environment Setup Guide**
+# CUDA Environment Setup Guide #
 
 Setting up a Python virtual environment that correctly utilizes your NVIDIA GPU via CUDA involves a few critical steps, primarily ensuring compatibility between your NVIDIA driver, the CUDA toolkit version, and the deep learning framework (like PyTorch, which `transformers` uses).
 
