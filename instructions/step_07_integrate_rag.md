@@ -1,4 +1,4 @@
-**Step 7: Integrate RAG and Placeholder LLM Call**
+# Step 7: Integrate RAG and Placeholder LLM Call #
 
 Okay, let's modify the `add_message_to_session` endpoint to incorporate the RAG search using ChromaDB and simulate an LLM response.
 
