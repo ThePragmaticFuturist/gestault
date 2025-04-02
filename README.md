@@ -6,8 +6,10 @@
 #### /ɡəˈSHtält,ɡəˈstält/ ####
 *noun* **Psychology** 
 ##### an organized whole that is perceived as more than the sum of its parts. #####  
+  
+***  
 
-
+  
 **Overall:** This server provides a strong foundation and demonstrates a complete workflow for a multi-backend RAG system using Python and FastAPI. It's an excellent learning tool and a solid starting point for a more production-ready application. 
 
 **Strengths:**
