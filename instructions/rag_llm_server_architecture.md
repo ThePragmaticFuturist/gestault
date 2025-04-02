@@ -4,7 +4,7 @@
 
 This diagram shows the main subsystems and their primary interactions.
 
-```mermaid
+```
 graph TD
     subgraph Client_Side
         User[User/Client Application]
