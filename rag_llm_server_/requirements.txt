@@ -1,0 +1,43 @@
+# requirements.txt
+
+# --- Core Web Framework & Server ---
+fastapi
+uvicorn[standard] # Includes extras like websockets, watchfiles for reload
+
+# --- Configuration ---
+pydantic-settings
+python-dotenv
+
+# --- Databases ---
+sqlalchemy          # Core SQL toolkit
+databases[sqlite]   # Async database access + sqlite driver (aiosqlite)
+chromadb            # Vector database
+
+# --- Document Processing ---
+python-docx         # For .docx files
+pypdf               # For .pdf files
+beautifulsoup4      # For HTML/XML parsing
+lxml                # Parser often used with BeautifulSoup
+langchain-text-splitters # For text chunking algorithms
+python-magic        # For file type detection (requires libmagic system library)
+aiofiles            # For async file operations
+
+# --- Embedding Model ---
+sentence-transformers # Easy interface for embedding models
+# torch, torchvision, torchaudio are dependencies, usually installed together
+torch
+torchvision
+torchaudio
+
+# --- LLM Loading & Interaction ---
+transformers        # Hugging Face core library for models/pipelines
+accelerate          # Optimizes model loading/execution across devices
+bitsandbytes        # For 8-bit/4-bit quantization (optional, often needs Linux/NVIDIA)
+sentencepiece       # Tokenizer used by many models
+
+# --- API Clients (for External LLMs) ---
+httpx               # Async HTTP client for Ollama/vLLM APIs
+
+# --- System Status ---
+psutil              # Cross-platform system metrics (CPU, RAM, Disk)
+pynvml              # For NVIDIA GPU monitoring (optional, requires NVIDIA drivers/setup)
