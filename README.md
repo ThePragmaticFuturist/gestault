@@ -1,4 +1,4 @@
-# A Local RAG LLM Server #
+# A Gestalt Approach to RAG LLM Servers #
 
 ###### Definitions from Oxford Languages ######
 
