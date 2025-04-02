@@ -1,4 +1,4 @@
-# A Local RAG LLM Foundation #
+# A Local RAG LLM Server #
 
 ###### Definitions from Oxford Languages ######
 
