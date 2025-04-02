@@ -1,4 +1,4 @@
-**Future Features & Enhancements**
+# Future Features & Enhancements #
 
 This server is a great start! Here are potential features to make it more robust and capable:
 
