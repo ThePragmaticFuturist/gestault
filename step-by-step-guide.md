@@ -1,4 +1,4 @@
-**Step-by-Step Annotated Guide to Building Your Own RAG LLM Server**
+# A Step-by-Step Annotated Guide to Building Your Own RAG LLM Server #  
 
 Here's a breakdown of the thought process behind generating the initial project structure and `main.py` for the RAG LLM server:
 
