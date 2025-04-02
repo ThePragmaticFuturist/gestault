@@ -75,6 +75,7 @@ Here's a breakdown of the thought process behind generating the initial project 
 This structured approach ensures that the foundation is solid before adding more complex features.
 
 **Step 1: Basic Server Structure (FastAPI)**
+
     *   **What:** Set up a minimal FastAPI application (`app/main.py`) run by Uvicorn. Created a root endpoint (`/`).
     *   **Why:** To establish the core web server framework using a modern, high-performance, async-capable library. Provides basic API structure and automatic documentation (`/docs`).
 
