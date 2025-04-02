@@ -1,4 +1,4 @@
-**Architecture and Data Flows of the RAG LLM server**
+# Architecture and Data Flows of the RAG LLM server #
 
 **1. High-Level Server Architecture Diagram**
 
