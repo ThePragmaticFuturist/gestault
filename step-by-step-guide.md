@@ -74,20 +74,19 @@ Here's a breakdown of the thought process behind generating the initial project 
 
 This structured approach ensures that the foundation is solid before adding more complex features.
 
-**Step 1: Basic Server Structure (FastAPI)**
-
+1.   **Step 1: Basic Server Structure (FastAPI)**
     *   **What:** Set up a minimal FastAPI application (`app/main.py`) run by Uvicorn. Created a root endpoint (`/`).
     *   **Why:** To establish the core web server framework using a modern, high-performance, async-capable library. Provides basic API structure and automatic documentation (`/docs`).
 
-**Step 2: Configuration & Database Initialization**
+2.   **Step 2: Configuration & Database Initialization**
     *   **What:** Defined settings using Pydantic (`core/config.py`), set up SQLite table schemas using SQLAlchemy Core (`db/models.py`), initialized ChromaDB client, and managed database connections (`db/database.py`). Created data directories.
     *   **Why:** Centralize configuration; define persistent storage for metadata (SQLite) and vectors (ChromaDB); ensure database connections are handled correctly during server startup/shutdown.
 
-**Step 3: Document Upload and Background Processing**
+3.   **Step 3: Document Upload and Background Processing**
     *   **What:** Created API endpoints for file upload (`app/api/endpoints/documents.py`). Implemented file handling, text extraction (`services/document_processor.py` using `python-docx`, `pypdf`, `beautifulsoup4`), chunking (`langchain-text-splitters`), and initial SQLite record creation. Used FastAPI `BackgroundTasks` for processing.
     *   **Why:** To allow users to ingest documents; handle different file types; break large documents into manageable chunks; offload time-consuming processing from the initial API request for better responsiveness.
 
-**Step 4: Vector Embedding Integration**
+4.   **Step 4: Vector Embedding Integration**
     *   **What:** Integrated `sentence-transformers` (`services/embedding_service.py`) to load an embedding model (pre-loaded on startup). Modified the background task to generate embeddings for chunks and store them, along with text and metadata, in ChromaDB. Updated document status in SQLite.
     *   **Why:** To convert text chunks into numerical representations (vectors) suitable for semantic similarity search, enabling the core RAG functionality.
 
