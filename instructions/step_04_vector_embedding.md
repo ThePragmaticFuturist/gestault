@@ -1,4 +1,4 @@
-**Step 4: Vector Embedding Integration**
+# Step 4: Vector Embedding Integration #
 
 Let's add vector embedding to the pipeline. We'll use the popular `sentence-transformers` library to load a model from Hugging Face and generate embeddings, then store them in ChromaDB.
 
