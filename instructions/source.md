@@ -11380,7 +11380,7 @@ async def shutdown_event():
 
 This provides a flexible architecture to switch between local inference and various dedicated inference servers. Remember the concurrency warning about modifying config for summarization if using the local backend.
 
-######################################
+#### *Human in the Loop Error Detection and Submission via Prompt:* ####  
 
 1.  **Identify the core question:** The user noticed `pipeline` and `tokenizer` were removed from the *global* `llm_state` dictionary in `llm_service.py` in the multi-backend refactor, and wants to know why.
 
@@ -11405,8 +11405,7 @@ This provides a flexible architecture to switch between local inference and vari
     *   Explain how the global service interacts with the specific backend instance.
     *   Conclude by summarizing the benefits (cleaner design, flexibility).
 
-
-#######################################
+#### *Human in the Loop Error Detection and Submission via Prompt:* ####  
 
 You are absolutely right to notice that! In the refactoring process for multi-backend support, the `pipeline` and `tokenizer` objects were **moved** from the *global* `llm_state` dictionary **into** the specific `LocalTransformersBackend` class instance.
 
@@ -11438,7 +11437,13 @@ Here's the reasoning:
 
 This design makes the service much more flexible and easier to extend with new backend types in the future, as each backend manages its own specific requirements.
 
-##################################
+#### *Human in the Loop Actions:* ####
+
+> **Prompt:**  
+>
+> continue
+
+#### *Here's the thinking process for generating the next component of the server:* ####
 
 Here's a thinking process for answering the question about setting an online LLM service backend via the POST request:
 
@@ -11478,7 +11483,13 @@ Here's a thinking process for answering the question about setting an online LLM
 
 7.  **Review and Refine:** Read through the explanation. Is it clear? Does it directly answer the user's question about what to pass? Does it correctly explain the role of server config vs. API request? Add bolding for key terms. Ensure the examples are clear.
 
-##################################
+#### *Human in the Loop Actions:* ####
+
+> **Prompt:**  
+>
+> continue
+
+#### *Gen AI Response:* ####
 
 Okay, let's clarify how to use the `POST /api/v1/models/load` endpoint to connect to an online LLM service like Ollama or vLLM using the architecture we built.
 
@@ -11562,630 +11573,7 @@ Here's the procedure:
 
 Now, when you send messages to a chat session, the `generate_text` function in `llm_service` will see the active backend is `OllamaBackend` (or `VLLMBackend`) and will call *its* `generate` method, which in turn makes the API call to the external Ollama/vLLM server using the configured model name (`llama3` in the example).
 
-##################################
-
-Done!!!!!!
-
-##################################
-
-Here's a thinking process for generating the citations/attributions list:
-
-1.  **Understand the Goal:** The user wants a list of citations and links for non-original code or concepts used in building the RAG LLM server. This is about giving credit and providing references for the tools and techniques employed.
-
-2.  **Review the Project Components:** Mentally (or actually) list the major parts of the server we built:
-    *   Web Framework (FastAPI)
-    *   Server Runner (Uvicorn)
-    *   Configuration (Pydantic, python-dotenv)
-    *   Database (SQLite via SQLAlchemy Core & `databases`, ChromaDB)
-    *   Document Loading/Parsing (python-docx, pypdf, beautifulsoup4, lxml, python-magic)
-    *   Text Chunking (LangChain)
-    *   Embedding (Sentence Transformers, PyTorch)
-    *   LLM Loading/Serving (Transformers, Accelerate, BitsAndBytes, PyTorch)
-    *   External LLM Clients (Ollama, vLLM via httpx)
-    *   System Monitoring (psutil, pynvml)
-    *   Core Concepts (RAG, Background Tasks, Async/Await, API Design)
-
-3.  **Go Through Each Component/Library:** For each item on the list, consider:
-    *   **What specific library was used?** (e.g., `fastapi`, `chromadb`, `sentence-transformers`).
-    *   **What was its primary purpose?** (e.g., web framework, vector DB, embeddings).
-    *   **Where would someone find official information?** (Usually the library's official documentation website or GitHub repository).
-    *   **Did we use specific code patterns or snippets *directly* inspired by documentation examples?** (Often yes, especially for initialization or basic usage).
-    *   **Did we use any specific algorithms or techniques with standard names?** (e.g., RAG, specific text splitting methods).
-
-4.  **Draft Entries for Each Library/Tool:**
-    *   **FastAPI:** Core framework. Link to its main page/docs. Mention its reliance on Starlette and Pydantic.
-    *   **Uvicorn:** ASGI server. Link to its docs/repo.
-    *   **Pydantic/pydantic-settings:** Data validation and configuration. Link to Pydantic docs.
-    *   **python-dotenv:** Loading `.env`. Link repo.
-    *   **SQLAlchemy:** SQL toolkit. Used Core. Link to SQLAlchemy docs.
-    *   **`databases` library:** Async DB interface. Link repo. Note `aiosqlite` dependency.
-    *   **ChromaDB:** Vector database. Link docs/repo. Mention `PersistentClient` and query methods.
-    *   **File Parsers:** List `python-docx`, `pypdf`, `beautifulsoup4`, `lxml`. Link their PyPI pages or docs. Mention their purpose.
-    *   **`python-magic`:** File type detection. Link repo. Mention `libmagic` dependency.
-    *   **`aiofiles`:** Async file I/O. Link repo.
-    *   **LangChain:** Specifically `langchain-text-splitters`. Mention `RecursiveCharacterTextSplitter`. Link to LangChain Python docs (maybe specifically the text splitters section if easy to find).
-    *   **Sentence Transformers:** Embedding generation. Link docs/repo. Mention loading model and `.encode()`.
-    *   **PyTorch:** Core ML framework, dependency for ST/Transformers. Link main site. Mention CUDA setup relevance.
-    *   **Transformers (Hugging Face):** Core library for LLMs. Link docs. Mention `pipeline`, `AutoTokenizer`, `AutoModelForCausalLM`, `generate`, `BitsAndBytesConfig`.
-    *   **Accelerate (Hugging Face):** Model loading/device mapping helper. Link docs/repo.
-    *   **BitsAndBytes:** Quantization library. Link repo. Mention CUDA dependency.
-    *   **`httpx`:** Async HTTP client for API backends. Link docs/repo.
-    *   **`psutil`:** System metrics. Link repo/docs.
-    *   **`pynvml`:** NVIDIA GPU metrics. Link PyPI/repo. Mention NVIDIA dependency.
-
-5.  **Consider Core Concepts/Techniques:**
-    *   **RAG (Retrieval-Augmented Generation):** This is a foundational concept. Link to a seminal paper (like the original RAG paper by Lewis et al.) or a good explanatory article/blog post from a reputable source (like Hugging Face or LangChain).
-    *   **FastAPI Background Tasks:** Used for document processing. Link to the relevant FastAPI documentation section.
-    *   **Asyncio (`run_in_executor`):** Used for running blocking tasks (embedding generation, local LLM inference) without blocking the event loop. Link to the Python `asyncio` documentation for executors.
-    *   **Dependency Injection (FastAPI):** Mentioned as a pattern (though not heavily used in the final code with global instances). Link FastAPI docs on dependencies.
-    *   **API Design (RESTful):** The structure follows general REST principles. No specific citation needed unless a particular design pattern was copied.
-
-6.  **Structure the Output:**
-    *   Start with a clear introductory statement.
-    *   Group citations by category (Core Framework, Databases, Document Processing, etc.) for readability.
-    *   For each item:
-        *   State the library/concept name clearly.
-        *   Briefly describe its purpose in the project.
-        *   Provide the primary URL (official documentation preferred, GitHub repo second).
-        *   Optionally mention specific functions or classes used if they are central (e.g., `pipeline`, `PersistentClient`, `RecursiveCharacterTextSplitter`).
-    *   Add concluding remarks about the iterative nature of development and standard practices.
-
-7.  **Review and Refine:**
-    *   Read through the generated list. Are the descriptions clear and accurate?
-    *   Are the links likely to be stable and point to the official source? (Avoid linking directly to specific version docs unless necessary, main docs page is better).
-    *   Is the formatting consistent?
-    *   Did I miss any major components? (Re-check the list from step 2).
-    *   Ensure the tone is appropriate – giving credit and providing resources.
-
-**(Self-Correction during review):** Initially, I might just list libraries. But the user asked for non-original *content* or *code*. So, I should explicitly mention *how* the library was used and link to documentation where similar patterns might be found (e.g., FastAPI background task docs, `run_in_executor` docs). Also, explicitly mentioning the RAG concept itself is important. Ensure URLs are to the main landing/documentation pages rather than potentially transient specific pages. Add notes about system dependencies (`libmagic`, CUDA, NVIDIA drivers).
-
-######################################
-
-Okay, let's go through the components and concepts we used to build the RAG LLM server and provide citations or links to relevant resources where applicable. This acknowledges the great open-source libraries and common patterns leveraged in this project.
-
-**1. Core Framework & Server**
-
-*   **FastAPI:** Used as the main asynchronous web framework for building the API. Its design heavily influenced the endpoint structure, request/response handling, background tasks, and dependency injection concepts (though we used global instances for simplicity in some cases).
-    *   **Citation/URL:** [https://fastapi.tiangolo.com/](https://fastapi.tiangolo.com/)
-    *   **Note:** FastAPI itself builds upon Starlette (ASGI toolkit) and Pydantic (data validation).
-*   **Uvicorn:** The ASGI server used to run the FastAPI application. The `[standard]` extra includes `watchfiles` for the `--reload` functionality.
-    *   **Citation/URL:** [https://www.uvicorn.org/](https://www.uvicorn.org/) / [https://github.com/encode/uvicorn](https://github.com/encode/uvicorn)
-
-**2. Configuration**
-
-*   **Pydantic (& `pydantic-settings`):** Used for defining configuration models (`Settings` class) and validating environment variables/`.env` file settings.
-    *   **Citation/URL:** [https://docs.pydantic.dev/](https://docs.pydantic.dev/)
-*   **`python-dotenv`:** Used implicitly by `pydantic-settings` to load variables from a `.env` file into environment variables.
-    *   **Citation/URL:** [https://github.com/theskumar/python-dotenv](https://github.com/theskumar/python-dotenv)
-
-**3. Databases**
-
-*   **SQLAlchemy (Core):** Used to define the structure of the SQLite tables (`sessions`, `chat_messages`, `documents`, `document_chunks`) using its schema definition tools (`Table`, `Column`, `MetaData`).
-    *   **Citation/URL:** [https://www.sqlalchemy.org/](https://www.sqlalchemy.org/) / [https://docs.sqlalchemy.org/en/20/core/](https://docs.sqlalchemy.org/en/20/core/)
-*   **`databases` library:** Used for performing asynchronous database operations (connect, disconnect, execute, fetch) against the SQLite database, integrating well with FastAPI's async nature.
-    *   **Citation/URL:** [https://github.com/encode/databases](https://github.com/encode/databases)
-    *   **Note:** Relies on `aiosqlite` for the async SQLite driver (`databases[sqlite]`).
-*   **ChromaDB:** Used as the vector database for storing and searching document chunk embeddings. We used `chromadb.PersistentClient` and methods like `get_or_create_collection`, `add`, and `query`.
-    *   **Citation/URL:** [https://www.trychroma.com/](https://www.trychroma.com/) / [https://docs.trychroma.com/](https://docs.trychroma.com/) / [https://github.com/chroma-core/chroma](https://github.com/chroma-core/chroma)
-
-**4. Document Processing**
-
-*   **`python-docx`:** Used to extract text content from `.docx` files.
-    *   **Citation/URL:** [https://python-docx.readthedocs.io/en/latest/](https://python-docx.readthedocs.io/en/latest/)
-*   **`pypdf`:** Used to extract text content from `.pdf` files.
-    *   **Citation/URL:** [https://pypdf.readthedocs.io/en/stable/](https://pypdf.readthedocs.io/en/stable/)
-*   **`beautifulsoup4` (Beautiful Soup) & `lxml`:** Used to parse and extract text content from HTML files. `lxml` is a fast parser often used with BeautifulSoup.
-    *   **Citation/URL (BS4):** [https://www.crummy.com/software/BeautifulSoup/bs4/doc/](https://www.crummy.com/software/BeautifulSoup/bs4/doc/)
-    *   **Citation/URL (lxml):** [https://lxml.de/](https://lxml.de/)
-*   **`python-magic`:** Used for reliable file type detection based on file content (magic numbers) rather than just extensions.
-    *   **Citation/URL:** [https://github.com/ahupp/python-magic](https://github.com/ahupp/python-magic)
-    *   **Note:** Requires system-level `libmagic` library.
-*   **`aiofiles`:** Used for performing asynchronous file reading/writing operations, particularly useful within FastAPI's async environment (though we used standard `shutil` for simplicity in the final upload code).
-    *   **Citation/URL:** [https://github.com/Tinche/aiofiles](https://github.com/Tinche/aiofiles)
-*   **`langchain-text-splitters`:** Used specifically for the `RecursiveCharacterTextSplitter` algorithm to chunk documents into smaller pieces.
-    *   **Citation/URL:** [https://python.langchain.com/docs/modules/data_connection/document_transformers/text_splitters/recursive_text_splitter](https://python.langchain.com/docs/modules/data_connection/document_transformers/text_splitters/recursive_text_splitter) (LangChain documentation)
-
-**5. Embedding Model**
-
-*   **`sentence-transformers`:** Used as a high-level interface to load and use sentence embedding models (like `all-MiniLM-L6-v2`) from the Hugging Face Hub via the `SentenceTransformer` class and its `.encode()` method.
-    *   **Citation/URL:** [https://www.sbert.net/](https://www.sbert.net/) / [https://github.com/UKPLab/sentence-transformers](https://github.com/UKPLab/sentence-transformers)
-*   **PyTorch:** The underlying deep learning framework required by `sentence-transformers` and `transformers`. Handled CUDA device management (`torch.cuda.is_available`, tensors).
-    *   **Citation/URL:** [https://pytorch.org/](https://pytorch.org/)
-
-**6. LLM Loading & Interaction**
-
-*   **`transformers` (Hugging Face):** The core library used for loading LLMs (via `pipeline`, `AutoTokenizer`, `AutoModelForCausalLM`), tokenizing input, and generating text (`pipeline()` call, `model.generate()`).
-    *   **Citation/URL:** [https://huggingface.co/docs/transformers/index](https://huggingface.co/docs/transformers/index)
-*   **`accelerate` (Hugging Face):** Used implicitly or explicitly (e.g., `device_map='auto'`) by `transformers` to handle efficient model loading and placement across devices (CPU, GPU, multiple GPUs).
-    *   **Citation/URL:** [https://huggingface.co/docs/accelerate/index](https://huggingface.co/docs/accelerate/index)
-*   **`bitsandbytes`:** Used for enabling 8-bit and 4-bit model quantization via `transformers` `BitsAndBytesConfig` to reduce memory usage.
-    *   **Citation/URL:** [https://github.com/TimDettmers/bitsandbytes](https://github.com/TimDettmers/bitsandbytes)
-*   **`sentencepiece`:** A tokenizer library dependency required by many Hugging Face models.
-    *   **Citation/URL:** [https://github.com/google/sentencepiece](https://github.com/google/sentencepiece)
-*   **`httpx`:** Used as the asynchronous HTTP client library to interact with external LLM API endpoints (Ollama, vLLM).
-    *   **Citation/URL:** [https://www.python-httpx.org/](https://www.python-httpx.org/)
-
-**7. System Status**
-
-*   **`psutil`:** Used to gather cross-platform system information like CPU usage/frequency, RAM usage, disk usage, and potentially temperatures.
-    *   **Citation/URL:** [https://github.com/giampaolo/psutil](https://github.com/giampaolo/psutil) / [https://psutil.readthedocs.io/en/latest/](https://psutil.readthedocs.io/en/latest/)
-*   **`pynvml`:** Used to get detailed NVIDIA GPU information (memory, utilization, temperature) by interfacing with the NVIDIA Management Library (NVML).
-    *   **Citation/URL:** [https://github.com/gpuopenanalytics/pynvml](https://github.com/gpuopenanalytics/pynvml) / [https://pypi.org/project/pynvml/](https://pypi.org/project/pynvml/)
-    *   **Note:** Relies on NVIDIA drivers being installed.
-
-**8. Core Concepts & Patterns**
-
-*   **RAG (Retrieval-Augmented Generation):** The fundamental architecture combining retrieval (from ChromaDB) with generation (by the LLM).
-    *   **Citation/URL (Seminal Paper):** Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Nogueira, G., ... & Kiela, D. (2020). Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks. *arXiv preprint arXiv:2005.11401*. [https://arxiv.org/abs/2005.11401](https://arxiv.org/abs/2005.11401)
-    *   **Citation/URL (Explanations):** Hugging Face Blog posts, LangChain documentation on RAG.
-*   **FastAPI Background Tasks:** The pattern used for offloading document processing (chunking, embedding) after the initial upload request returned.
-    *   **Citation/URL:** [https://fastapi.tiangolo.com/tutorial/background-tasks/](https://fastapi.tiangolo.com/tutorial/background-tasks/)
-*   **Asyncio `run_in_executor`:** Used to run blocking, CPU/GPU-bound code (local LLM inference, summarization) in a separate thread pool without blocking the main FastAPI async event loop.
-    *   **Citation/URL:** [https://docs.python.org/3/library/asyncio-eventloop.html#executing-code-in-thread-or-process-pools](https://docs.python.org/3/library/asyncio-eventloop.html#executing-code-in-thread-or-process-pools)
-*   **Hugging Face Hub Cache Structure:** Understanding the `models--<org>--<model>` and `snapshots/<hash>` structure was used for scanning the cache. Documented implicitly via library usage.
-    *   **Citation/URL:** [https://huggingface.co/docs/huggingface_hub/guides/manage-cache](https://huggingface.co/docs/huggingface_hub/guides/manage-cache)
-*   **OpenAI-Compatible API:** The structure used for interacting with vLLM (and potentially InstructLab) follows the conventions established by OpenAI's API for chat completions.
-    *   **Citation/URL:** [https://platform.openai.com/docs/api-reference/chat](https://platform.openai.com/docs/api-reference/chat) / vLLM documentation on OpenAI compatibility.
-
-This list covers the primary external libraries and core concepts. Standard Python libraries (`os`, `datetime`, `logging`, `uuid`, `shutil`, `json`, `typing`, `abc`, `asyncio`, etc.) are generally not cited unless a very specific, non-obvious pattern was directly copied. The overall structure and integration logic represent the collaborative development process.
-
-########################################
-
-Here's a breakdown of the thought process to generate the architecture diagrams and process flows:
-
-1.  **Understand the Request:** The user wants a high-level architecture diagram followed by more detailed diagrams and process flows for each major component of the RAG LLM server we built. The diagrams should show connections and data movement.
-
-2.  **Identify Major Components:** Review the features and code structure developed:
-    *   **API Layer (FastAPI):** The entry point for all external interactions.
-    *   **Configuration (`core/config.py`):** Central settings used by many components.
-    *   **Database (SQLite):** Stores metadata (documents, chunks, sessions, messages).
-    *   **Vector Store (ChromaDB):** Stores document/chunk embeddings.
-    *   **Document Processor (`services/document_processor.py`):** Handles upload, parsing, chunking.
-    *   **Embedding Service (`services/embedding_service.py`):** Loads embedding model, generates embeddings.
-    *   **LLM Service/Backends (`services/llm_service.py`, `llm_backends.py`):** Manages LLM loading (local/API), configuration, and generation.
-    *   **System Status Service (`services/system_service.py`):** Gathers system metrics.
-
-3.  **Plan Diagram Types:**
-    *   **High-Level Architecture:** A single diagram showing the main components and their primary relationships. Focus on subsystems rather than individual files/functions. Use boxes and arrows.
-    *   **Component Diagrams/Flows:** For each major *process* or *subsystem*, show:
-        *   The API endpoint(s) involved.
-        *   The sequence of actions/function calls.
-        *   Interactions with databases (SQLite, ChromaDB).
-        *   Interactions with external services (Ollama, vLLM APIs).
-        *   Key data transformations (e.g., file -> text -> chunks -> embeddings).
-        *   Use flow chart symbols (rectangles for processes, parallelograms for data I/O, cylinders for databases, arrows for flow).
-
-4.  **Draft High-Level Architecture Diagram:**
-    *   Start with the central "FastAPI Server" box.
-    *   Place "User/Client" outside, interacting via API.
-    *   Draw boxes for the key storage/processing units: SQLite, ChromaDB, Embedding Service, LLM Service (abstracting backends), Document Processor.
-    *   Add Configuration as a resource used by many.
-    *   Add System Status Service.
-    *   Draw arrows indicating primary interactions:
-        *   Client -> FastAPI
-        *   FastAPI -> Document Processor (via background task) -> SQLite, Embedding Service
-        *   FastAPI -> LLM Service -> (Local Loader / API Backends)
-        *   FastAPI -> Search (using Embedding Service, ChromaDB, SQLite)
-        *   FastAPI -> Session Mgmt -> SQLite
-        *   FastAPI -> System Status Service
-        *   Embedding Service -> ChromaDB
-        *   Document Processor -> SQLite
-        *   LLM Service (local) -> relies on loaded models/tokenizer
-        *   LLM Service (API) -> external APIs
-        *   System Status -> OS/Hardware/NVML
-    *   Keep it relatively clean, avoiding every single interaction detail. Label arrows clearly.
-
-5.  **Draft Component Diagrams/Flows (Iterative Process):**
-
-    *   **Document Ingestion:**
-        *   Trigger: `POST /documents/upload` API call with file data.
-        *   FastAPI saves temp file.
-        *   FastAPI creates initial record in SQLite (`documents` table, status='pending').
-        *   FastAPI schedules background task (`process_document_upload`).
-        *   *Background Task:*
-            *   Read temp file.
-            *   Detect file type (`python-magic`).
-            *   Update SQLite status ('processing').
-            *   Extract text (using `pypdf`, `python-docx`, etc.).
-            *   Update SQLite status ('chunking').
-            *   Chunk text (`RecursiveCharacterTextSplitter`).
-            *   Save chunks to SQLite (`document_chunks` table). Update status ('embedding').
-            *   Get embedding model (`embedding_service`).
-            *   Generate embeddings for chunks.
-            *   Add embeddings, chunk IDs, text, metadata to ChromaDB.
-            *   Update SQLite status ('completed'), store counts.
-            *   Handle errors (update SQLite status 'failed', log).
-            *   Clean up temp file.
-    *   **Search (Semantic):**
-        *   Trigger: `POST /documents/search/semantic` API call with query, `top_k`, filters.
-        *   FastAPI calls `embedding_service.generate_embeddings` for the query text.
-        *   FastAPI constructs ChromaDB `where` filter (if needed).
-        *   FastAPI calls `chromadb_collection.query()` with embedding, `n_results`, filter.
-        *   FastAPI receives results (IDs, distances, documents, metadatas).
-        *   FastAPI formats results into `SearchResponse`.
-        *   FastAPI returns response to client.
-    *   **Search (Keyword):**
-        *   Trigger: `POST /documents/search/keyword`.
-        *   FastAPI builds SQL `SELECT ... WHERE ... LIKE ...` query for `document_chunks` table in SQLite.
-        *   FastAPI applies filters (`document_ids`) and limits (`top_k`).
-        *   FastAPI executes query against SQLite (`database.fetch_all`).
-        *   FastAPI formats results.
-        *   FastAPI returns response.
-    *   **LLM Loading/Configuration:**
-        *   Trigger: `POST /models/load` API call with model ID, potentially local-specific options.
-        *   FastAPI checks `settings.LLM_BACKEND_TYPE`.
-        *   FastAPI calls `llm_service.set_active_backend`.
-        *   *`set_active_backend`:*
-            *   Calls `_unload_current_backend` (which cleans up local resources or closes HTTP clients).
-            *   If `local`: Creates `LocalTransformersBackend`, schedules `_load_local_model_task` in executor (which loads pipeline/tokenizer, updates local backend state, sets global status). Returns 202.
-            *   If `ollama`/`vllm`: Creates corresponding backend instance (with URL, model name), sets global status to READY. Returns 202/200.
-            *   Handles errors, sets status to FAILED.
-    *   **Chat Interaction (RAG + LLM):**
-        *   Trigger: `POST /sessions/{session_id}/messages` with user message.
-        *   FastAPI gets session data (including `rag_document_ids`) from SQLite.
-        *   FastAPI stores user message in SQLite (`chat_messages`).
-        *   FastAPI checks `rag_document_ids`.
-        *   *If RAG IDs exist:*
-            *   Calls `embedding_service.generate_embeddings` for user message.
-            *   Queries ChromaDB (using document ID filter).
-            *   (Optional Summarization): Loop through results -> `run_in_executor(summarize_text_with_query, ...)` which itself calls `llm_service.generate_text`.
-            *   Construct `rag_context` (from chunks or summaries).
-        *   Retrieves chat history from SQLite (`chat_messages`).
-        *   Constructs final `prompt_for_llm` (checking token limits with tokenizer from `llm_state`).
-        *   Calls `llm_service.generate_text(prompt_for_llm)`.
-        *   *`llm_service.generate_text`:*
-            *   Gets active `backend_instance` from `llm_state`.
-            *   Gets global `config`.
-            *   If `LocalTransformersBackend`: Calls `run_in_executor(backend.generate, prompt, config)`.
-            *   If `OllamaBackend` / `VLLMBackend`: Calls `await backend.generate(prompt, config)` (which makes HTTP call).
-            *   Returns generated text or `None`.
-        *   FastAPI receives response/`None`.
-        *   FastAPI stores assistant message (or error) in SQLite (`chat_messages`).
-        *   FastAPI returns assistant message to client.
-    *   **System Status:**
-        *   Trigger: `GET /system/status`.
-        *   FastAPI calls `system_service.get_full_system_status`.
-        *   *`get_full_system_status` calls:*
-            *   `get_cpu_status` (`psutil`).
-            *   `get_memory_status` (`psutil`).
-            *   `get_disk_status` (`psutil`).
-            *   `get_gpu_status` (`pynvml`, if available).
-            *   `get_temperature_status` (`psutil`, if available).
-        *   FastAPI receives dictionary of status data.
-        *   FastAPI validates/formats using `SystemStatusResponse.parse_obj`.
-        *   FastAPI returns response.
-
-6.  **Refine Diagrams:**
-    *   Use clear labels for boxes and arrows.
-    *   Ensure consistent terminology.
-    *   Use standard diagramming conventions where possible (though text-based diagrams have limitations).
-    *   Add notes where necessary (e.g., background tasks, executor usage, conditional steps).
-    *   Review for clarity and accuracy against the developed code. Ensure major interactions are captured.
-
-7.  **Format Output:** Present the diagrams clearly using text/ASCII art or markdown code blocks. Provide explanations for each diagram.
-
-##########################################
-
-Okay, let's visualize the architecture and data flows of the RAG LLM server we've built.
-
-**1. High-Level Server Architecture Diagram**
-
-This diagram shows the main subsystems and their primary interactions.
-
-```mermaid
-graph TD
-    subgraph Client_Side
-        User[User/Client Application]
-    end
-
-    subgraph FastAPI_Server [FastAPI Server (Python/Uvicorn)]
-        A[API Endpoints<br/>(FastAPI Routers)]
-        B[Configuration<br/>(core/config.py)]
-        C[Background Tasks<br/>(FastAPI)]
-        D[Services Layer]
-        E[Database Layer<br/>(SQLAlchemy Core + Databases Lib)]
-        F[Vector DB Client<br/>(ChromaDB Client)]
-        G[LLM Loader/Manager<br/>(Local/API Handling)]
-        H[Embedding Loader<br/>(SentenceTransformer)]
-    end
-
-    subgraph Storage
-        SQL[(SQLite DB<br/>Metadata, Sessions, Chunks)]
-        VDB[(ChromaDB<br/>Vector Embeddings)]
-    end
-
-    subgraph External_Services
-        ExtLLM[Ollama/vLLM/InstructLab API<br/>(Optional)]
-        HFModels[Hugging Face Hub<br/>(Model Downloads)]
-    end
-
-    subgraph System_Monitoring
-        SysMon[System Resources<br/>(psutil, pynvml)]
-    end
-
-    User -- HTTP API Requests --> A
-    A -- Uses --> B
-    A -- Triggers --> C
-    A -- Calls --> D
-    A -- Reads/Writes --> E
-    A -- Reads/Writes --> F
-    A -- Manages --> G
-    A -- Monitors --> SysMon
-
-    C -- Calls --> D[Document Processor, Embedding]
-
-    D -- Uses --> B
-    D -- Reads/Writes --> E
-    D -- Reads/Writes --> F
-    D -- Uses --> G
-    D -- Uses --> H
-    D -- Reads --> SysMon
-
-    E -- Interacts with --> SQL
-    F -- Interacts with --> VDB
-
-    G -- Loads/Interacts --> HFModels
-    G -- Interacts (Optional) --> ExtLLM
-    G -- Uses --> H[If loading local embedding model needs HF]
-
-    H -- Loads --> HFModels
-
-    style FastAPI_Server fill:#f9f,stroke:#333,stroke-width:2px
-    style Storage fill:#ccf,stroke:#333,stroke-width:1px
-    style External_Services fill:#ccf,stroke:#333,stroke-width:1px
-    style System_Monitoring fill:#cfc,stroke:#333,stroke-width:1px
-```
-
-**Explanation:**
-
-*   The **User** interacts with the **API Endpoints** built with FastAPI.
-*   These endpoints use **Configuration**, trigger **Background Tasks**, and call various functions in the **Services Layer**.
-*   The **Services Layer** contains the core logic (Document Processing, Embedding, LLM, System Status).
-*   Services interact with the **Database Layer** (for SQLite) and the **Vector DB Client** (for ChromaDB).
-*   The **LLM Loader/Manager** handles loading models either locally (potentially downloading from **Hugging Face Hub**) or configuring connections to **External LLM APIs**.
-*   The **Embedding Loader** loads the sentence transformer model, likely from the **Hugging Face Hub**.
-*   **System Monitoring** uses libraries to check underlying system resources.
-
----
-
-**2. Component Diagrams & Data Flows**
-
-**2.1. Document Ingestion Flow**
-
-*   **Trigger:** `POST /api/v1/documents/upload` with file data.
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API (FastAPI /documents)
-    participant SQLite (documents table)
-    participant BackgroundTask (document_processor)
-    participant TextExtractor (docx, pdf, etc.)
-    participant TextChunker (langchain)
-    participant SQLite (chunks table)
-    participant EmbeddingService
-    participant ChromaDB
-
-    Client ->>+ API: Upload File (e.g., doc.pdf)
-    API ->> API: Save to temp file (/tmp/...)
-    API ->>+ SQLite: INSERT document (id, filename, status='pending')
-    SQLite -->>- API: Confirm Insert
-    API -->>- Client: 202 Accepted (doc_id)
-    API ->> BackgroundTask: Schedule process_document_upload(temp_path, doc_id, filename)
-
-    Note over BackgroundTask: Runs asynchronously
-
-    BackgroundTask ->>+ SQLite: UPDATE document SET status='processing' WHERE id=doc_id
-    SQLite -->>- BackgroundTask: Confirm Update
-    BackgroundTask ->>+ TextExtractor: extract_text(temp_path)
-    TextExtractor -->>- BackgroundTask: extracted_text
-    BackgroundTask ->>+ SQLite: UPDATE document SET status='chunking' WHERE id=doc_id
-    SQLite -->>- BackgroundTask: Confirm Update
-    BackgroundTask ->>+ TextChunker: chunk_text(extracted_text)
-    TextChunker -->>- BackgroundTask: List[chunk_text]
-    BackgroundTask ->>+ SQLite: INSERT MANY chunks (chunk_id, doc_id, index, text)
-    SQLite -->>- BackgroundTask: Confirm Insert
-    BackgroundTask ->>+ SQLite: UPDATE document SET status='embedding', chunk_count=N WHERE id=doc_id
-    SQLite -->>- BackgroundTask: Confirm Update
-    BackgroundTask ->>+ EmbeddingService: generate_embeddings(List[chunk_text])
-    EmbeddingService -->>- BackgroundTask: List[embedding_vector]
-    BackgroundTask ->>+ ChromaDB: collection.add(ids=chunk_ids, embeddings=vectors, documents=chunks, metadatas=...)
-    ChromaDB -->>- BackgroundTask: Confirm Add
-    BackgroundTask ->>+ SQLite: UPDATE document SET status='completed', vector_count=N WHERE id=doc_id
-    SQLite -->>- BackgroundTask: Confirm Update
-    BackgroundTask ->> BackgroundTask: Delete temp file
-
-    alt On Error during processing
-        BackgroundTask ->>+ SQLite: UPDATE document SET status='failed', error_message=... WHERE id=doc_id
-        SQLite -->>- BackgroundTask: Confirm Update
-        BackgroundTask ->> BackgroundTask: Delete temp file
-    end
-
-```
-
-**2.2. Semantic Search Flow**
-
-*   **Trigger:** `POST /api/v1/documents/search/semantic` with query data.
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API (FastAPI /documents)
-    participant EmbeddingService
-    participant ChromaDB
-
-    Client ->>+ API: POST SearchQuery(query, top_k, filters)
-    API ->>+ EmbeddingService: generate_embeddings([query_text])
-    EmbeddingService -->>- API: List[query_vector]
-    API ->> API: Build ChromaDB 'where' filter (optional)
-    API ->>+ ChromaDB: collection.query(query_embeddings, n_results, where=filter, include=...)
-    ChromaDB -->>- API: SearchResults (ids, distances, documents, metadatas)
-    API ->> API: Format results into List[ChunkResult]
-    API -->>- Client: 200 OK SearchResponse(results)
-
-    alt Embedding/Query Error
-        EmbeddingService -->> API: None / Exception
-        API -->> Client: 500 Internal Server Error
-    end
-    alt ChromaDB Error
-        ChromaDB -->> API: Exception
-        API -->> Client: 500 Internal Server Error
-    end
-```
-
-**2.3. LLM Loading Flow (Local Backend Example)**
-
-*   **Trigger:** `POST /api/v1/models/load` with `model_name_or_path`. (Server `LLM_BACKEND_TYPE` is `local`).
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API (FastAPI /models)
-    participant LLMService (set_active_backend)
-    participant LLMService (_unload_current_backend)
-    participant LLMService (Background Executor)
-    participant LLMService (_load_local_model_task)
-    participant LocalBackend (Instance)
-    participant TransformersLib
-
-    Client ->>+ API: POST ModelLoadRequest(model_id, device?, quant?)
-    API ->> API: Check if already Loading/Unloading (If yes, return 409)
-    API ->>+ LLMService: await set_active_backend(type='local', model_id, ...)
-    LLMService ->>+ LLMService (_unload_current_backend): await unload() [If previous backend exists]
-    LLMService (_unload_current_backend) ->> LocalBackend: await self.unload() [If prev was local]
-    LocalBackend -->> LLMService (_unload_current_backend): Cleanup done
-    LLMService (_unload_current_backend) -->>- LLMService: Unload complete
-    LLMService ->> LocalBackend: Create instance: backend = LocalTransformersBackend()
-    LLMService ->> LLMService: Update global state (status=LOADING, backend_instance=backend)
-    LLMService ->> LLMService (Background Executor): Schedule local_load_wrapper(backend, model_id, ...)
-    LLMService -->>- API: Return early (Loading scheduled)
-    API -->>- Client: 202 Accepted {"message": "Loading initiated..."}
-
-    Note right of LLMService (Background Executor): Runs in separate thread
-    LLMService (Background Executor) ->>+ LLMService (_load_local_model_task): asyncio.run(_load_local_model_task(backend, ...))
-    LLMService (_load_local_model_task) ->>+ TransformersLib: AutoTokenizer.from_pretrained(model_id)
-    TransformersLib -->>- LLMService (_load_local_model_task): tokenizer
-    LLMService (_load_local_model_task) ->>+ TransformersLib: pipeline(model=model_id, tokenizer=...)
-    TransformersLib -->>- LLMService (_load_local_model_task): pipeline_instance
-    LLMService (_load_local_model_task) ->> LocalBackend: Update instance: backend.pipeline = ..., backend.tokenizer = ...
-    LLMService (_load_local_model_task) ->> LLMService: Update global state (status=READY, active_model=...)
-    LLMService (_load_local_model_task) -->>- LLMService (Background Executor): Task complete
-
-    alt Loading Fails
-        LLMService (_load_local_model_task) ->> LocalBackend: Clear instance attributes (pipeline=None, etc.)
-        LLMService (_load_local_model_task) ->> LLMService: Update global state (status=FAILED, error=...)
-        LLMService (_load_local_model_task) -->>- LLMService (Background Executor): Task failed
-    end
-
-```
-
-**2.4. Chat Interaction Flow (with RAG & Summarization)**
-
-*   **Trigger:** `POST /api/v1/sessions/{session_id}/messages` with user message.
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API (FastAPI /sessions)
-    participant SQLite (sessions, chat_messages)
-    participant EmbeddingService
-    participant ChromaDB
-    participant LLMService (summarize/generate)
-    participant LLMExecutor (Background Thread)
-    participant ActiveBackend (Local/Ollama/vLLM)
-
-
-    Client ->>+ API: POST user_message
-    API ->>+ SQLite: Fetch session data (incl. rag_doc_ids)
-    SQLite -->>- API: Session data
-    API ->>+ SQLite: INSERT user_message
-    SQLite -->>- API: Confirm insert, update session timestamp
-    API ->>+ EmbeddingService: generate_embeddings([user_message])
-    EmbeddingService -->>- API: query_embedding
-    API ->>+ ChromaDB: query(query_embedding, filter=rag_doc_ids)
-    ChromaDB -->>- API: retrieved_chunks (text, metadata)
-
-    loop For Each Retrieved Chunk
-        API ->>+ LLMExecutor: Schedule summarize_text_with_query(chunk_text, user_query)
-        LLMExecutor ->>+ LLMService: summarize_text_with_query(...)
-        LLMService ->>+ LLMService: generate_text(summary_prompt) [Uses temp config]
-            Note over LLMService: This might call executor again if backend is local
-            LLMService ->> ActiveBackend: generate(summary_prompt, temp_config)
-            ActiveBackend -->> LLMService: summary_text / None
-        LLMService -->>- LLMExecutor: summary_text / None
-        LLMExecutor -->>- API: summary_text / None
-        API ->> API: Append summary to context_parts
-    end
-
-    API ->> API: Combine summaries into rag_context
-    API ->>+ SQLite: Fetch chat_history for session
-    SQLite -->>- API: List[messages]
-    API ->> API: Get tokenizer, max_length from llm_state
-    API ->> API: Build final_prompt (Instruction, Summarized Context, History, Query)
-    API ->> API: Check/Truncate final_prompt based on token limits
-
-    API ->>+ LLMExecutor: Schedule generate_text(final_prompt)
-    LLMExecutor ->>+ LLMService: generate_text(final_prompt) [Uses main config]
-    LLMService ->> ActiveBackend: generate(final_prompt, main_config) [Direct await if API backend]
-    ActiveBackend -->> LLMService: assistant_response_text / None
-    LLMService -->>- LLMExecutor: assistant_response_text / None
-    LLMExecutor -->>- API: assistant_response_text / None
-
-    alt LLM Generation Fails
-        API ->> API: Set assistant_response_content = "[ERROR...]"
-        API ->> API: Record error in metadata
-    end
-
-    API ->>+ SQLite: INSERT assistant_message (content, metadata)
-    SQLite -->>- API: Confirm insert, update session timestamp
-    API -->>- Client: 201 Created (assistant_message details)
-
-```
-
-**2.5. System Status Flow**
-
-*   **Trigger:** `GET /api/v1/system/status`
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API (FastAPI /system)
-    participant SystemService (get_full_system_status)
-    participant psutil
-    participant pynvml (Optional)
-
-    Client ->>+ API: GET /status
-    API ->>+ SystemService: get_full_system_status()
-    SystemService ->>+ psutil: cpu_percent(), cpu_count(), cpu_freq()
-    psutil -->>- SystemService: CPU data
-    SystemService ->>+ psutil: virtual_memory()
-    psutil -->>- SystemService: Memory data
-    SystemService ->>+ psutil: disk_partitions(), disk_usage('/')
-    psutil -->>- SystemService: Disk data
-    opt pynvml Available
-        SystemService ->>+ pynvml: nvmlDeviceGetCount(), GetHandle(), GetName(), GetMemoryInfo(), GetUtilization(), GetTemperature()
-        pynvml -->>- SystemService: GPU data list
-    end
-    opt psutil Temp Sensors Available
-        SystemService ->>+ psutil: sensors_temperatures()
-        psutil -->>- SystemService: Temperature data
-    end
-    SystemService ->> SystemService: Assemble status dictionary
-    SystemService -->>- API: status_dict
-    API ->> API: Validate with SystemStatusResponse.parse_obj(status_dict)
-    API -->>- Client: 200 OK SystemStatusResponse
-
-    alt Error Getting Status
-        SystemService/psutil/pynvml -->> API: Exception
-        API -->> Client: 500 Internal Server Error
-    end
-```
-
-These diagrams illustrate the key interactions and data movements within the server architecture we've developed.
-
-########################################
-
-***found an error when trying to use an external LLM server***
+#### *Human in the Loop Error Detection and Submission via Prompt:* #### 
 
 INFO:     127.0.0.1:38752 - "GET /api/v1/models/status HTTP/1.1" 200 OK
 INFO:app.api.endpoints.models:Request received to activate model 'llama3' on backend 'ollama'.
@@ -12239,7 +11627,7 @@ Traceback (most recent call last):
     raise AttributeError(name) from None
 AttributeError: LOADED
 
-#########################################
+#### *Here's the thinking process for addressing the error:* ####
 
 Ah, this error indicates a slight mismatch between the Enum values we defined and how we're checking them.
 
@@ -12374,7 +11762,13 @@ async def add_message_to_session(
 
 The `AttributeError` should be resolved, and the check for the LLM being ready should now use the correct `READY` status, allowing the request to proceed to the Ollama API call.
 
-############################################
+#### *Human in the Loop Actions:* ####
+
+> **Prompt:**  
+>
+> modify the server to select the backend type via the API request
+
+#### *Here's the thinking process for generating the next component of the server:* ####
 
 Here's a breakdown of the thought process to modify the server to select the backend type via the API request:
 
@@ -12427,7 +11821,13 @@ Here's a breakdown of the thought process to modify the server to select the bac
 
 8.  **Document Testing:** Outline the test cases needed (no type in request, explicit type in request, no model name in request, etc.).
 
-#######################################
+#### *Human in the Loop Actions:* ####
+
+> **Prompt:**  
+>
+> continue
+
+#### *Gen AI Response:* ####
 
 Okay, let's modify the server to allow selecting the backend type via the API request body for `POST /models/load`, with `local` as the default if not specified.
 
@@ -12682,14 +12082,12 @@ async def load_or_set_model(
 
 This gives you the flexibility to switch models and target different running inference servers dynamically via the API, while still having sensible server-side defaults.
 
-########################################
-
-***implementation error***
+#### *Human in the Loop Error Detection and Submission via Prompt:* ####  
 
 Attempting to import 'models' endpoint module...
 FAILED to import 'models' with unexpected error: positional argument follows keyword argument (llm.py, line 18)
 
-########################################
+#### *Here's the thinking process for addressing the error:* ####
 
 This error message is very specific and points directly to the cause:
 
@@ -12746,9 +12144,7 @@ my_field: Optional[float] = Field(default=None, description="My Description", ge
 
 The import error should now be resolved, and the `models` router should be included successfully.
 
-#############################
-
-***Error continued***
+#### *Human in the Loop Error Detection and Submission via Prompt:* ####  
 
 here is the code - line 18 is in the ModelLoadRequest(BaseModel) class:
 
@@ -12811,7 +12207,7 @@ class AvailableModelsResponse(BaseModel):
     local_model_paths: List[str] = Field(description="Absolute paths to models found in the dedicated local_models directory.")
     cached_hub_models: List[str] = Field(description="Model IDs found in the Hugging Face Hub cache directory.")
 
-################################
+#### *Here's the thinking process for addressing the error:* ####
 
 You're right, line 18 according to this code is indeed within the `ModelLoadRequest` class, specifically this line:
 
@@ -12854,9 +12250,13 @@ class ModelLoadRequest(BaseModel):
 
 The `SyntaxError` during import should now be resolved, and the `models` router should load correctly.
 
-######################################
+#### *Human in the Loop Actions:* ####
 
-***add code to int hugginface cli login***
+> **Prompt:**  
+>
+> add a Hugging Face login check
+
+#### *Gen AI Response:* ####
 
 Here's a thinking process for adding the Hugging Face login check:
 
@@ -12931,7 +12331,7 @@ Here's a thinking process for adding the Hugging Face login check:
 
 9.  **Documentation/Explanation:** Explain *why* this check is necessary (private/gated models), how it works (`get_token`), where it's placed, and what the user needs to do (`huggingface-cli login`). Also, explicitly mention the `llama3` model requires authentication as it's gated.
 
-###################################
+#### *Human in the Loop Error Detection and Submission via Prompt:* ####  
 
 Okay, you've hit a very common scenario when dealing with Hugging Face models, especially popular ones like Llama 3.
 
@@ -13247,9 +12647,13 @@ print("--- End of main.py ---") # Should not be reached when run with uvicorn no
 
 This check ensures that the necessary authentication prerequisite is met before the server fully starts, preventing confusing errors later when trying to access gated models.
 
-####################################
+#### *Human in the Loop Actions:* ####
 
-***pull token from .env file***
+> **Prompt:**  
+>
+> pull huggingface token from .env file
+
+#### *Gen AI Response:* ####
 
 Okay, yes, we can definitely modify the server to read the Hugging Face token from the `.env` file instead of solely relying on the `huggingface-cli login` cache. This is a common and often preferred method for server deployments or CI/CD environments.
 
