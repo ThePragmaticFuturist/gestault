@@ -10,7 +10,7 @@
 ***  
 
   
-**Overall:** This server provides a strong foundation and demonstrates a complete workflow for a multi-backend RAG system using Python and FastAPI. It's an excellent learning tool and a solid starting point for a more production-ready application. 
+**Overall:** This project is an example of the current "vibe coding" movement. I worked with Google's Gemini 2.5 to peer code a complete RAG LLM Server. My goal was to code by prompting Gemini and have it generate the code. In lest than 24 hours, we created a fairly sophisticated server and API that is ready for my next project which is designing and building a powerful React.js chat application. This server provides a strong foundation and demonstrates a complete workflow for a multi-backend RAG system using Python and FastAPI. It's an excellent learning tool and a solid starting point for a more production-ready application. 
 
 **Strengths:**
 
