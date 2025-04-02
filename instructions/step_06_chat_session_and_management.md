@@ -1,4 +1,4 @@
-**Step 6: Chat Session and Message Management API**
+# Step 6: Chat Session and Message Management API #
 
 Okay, let's create the API endpoints and database logic for managing chat sessions and their message history. We'll focus on storing the data correctly in our SQLite tables (`sessions` and `chat_messages`).
 
