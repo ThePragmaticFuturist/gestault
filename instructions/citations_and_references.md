@@ -1,4 +1,4 @@
-***Citations or Links to Relevant Resources***
+# Citations or Links to Relevant Resources #
 
 This acknowledges the great open-source libraries and common patterns leveraged in this project.
 
