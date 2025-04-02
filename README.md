@@ -1,4 +1,4 @@
-# A Local LLM Foundation to Build Upon #
+# A Local RAG LLM Foundation #
 
 ###### Definitions from Oxford Languages ######
 
@@ -33,4 +33,4 @@
 *   **User Interface:** A front-end application would be needed for user interaction beyond API calls.
 *   **Scalability:** For very high loads, components like document processing might benefit from a dedicated task queue (Celery, RQ, Arq) instead of FastAPI's `BackgroundTasks`.
 
- **Click here [step-by-step-guide.md] to get started building your own local RAG enabled LLM Server.**
+ **[Click here] (step-by-step-guide.md) to get started building your own local RAG enabled LLM Server.**
