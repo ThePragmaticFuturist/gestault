@@ -433,3 +433,24 @@ We have now established the basic framework for managing chat sessions:
 *   Database logic to store session metadata in the `sessions` table and message history in the `chat_messages` table.
 *   Correct handling of timestamps (`created_at`, `last_updated_at`) and relationships between sessions and messages.
 *   Use of transactions for data integrity (deleting sessions, adding messages).
+
+**Next Steps:**
+
+The server can now store conversations. The next logical steps involve making the chat interactive and leveraging our RAG setup:
+
+1.  **LLM Integration:**
+    *   Loading an actual LLM (local or via API).
+    *   Modifying the `POST /api/v1/sessions/{session_id}/messages` endpoint:
+        *   After storing the user message.
+        *   **(RAG Step)** Perform semantic search on associated documents (using `rag_document_ids` from the session) and potentially past messages in the current session.
+        *   Construct a prompt including the retrieved context and the latest user message (and possibly some prior conversation turns).
+        *   Send the prompt to the loaded LLM.
+        *   Receive the LLM response.
+        *   Store the LLM response as an 'assistant' message in the `chat_messages` table.
+        *   Return *both* the user message *and* the assistant response (or just the assistant response) to the client.
+2.  **LLM Management API:**
+    *   Endpoints to list available local models.
+    *   Endpoint to load a specific model (from Hugging Face Hub or local path).
+    *   Endpoint to get the status of the currently loaded model.
+    *   Endpoints to get/set LLM parameters (temperature, top_k, etc.).
+3.  **System Status API:** Endpoints to report CPU/GPU usage, RAM, disk space, etc.
