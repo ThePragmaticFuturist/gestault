@@ -1,8 +1,11 @@
 # Augmented General Intelligence (AGI)
 
 > To best understand the "vibe coding" approach I took with Gemini 2.5, I have included the entire transcript of the threaded conversation and the reasoning process that Gemini 2.5 conducted to produce its results. There were times Gemini 2.5 made errors or the Python packages were out of synch with the Gemini 2.5 training. You will see the evolution of my error checking and resolution methodology with my AI peer coder. There were also times where I made the mistake as in the case where I inadverdantly saved the main.py file in the root directory and then continued to edit the wrong version while trying to address an error thus never actually testing the changes Gemini and I wanted to make. By working bck and forth we eventually found the cause. Had I been coding this myself it could have taken hours. As it was, it only took a few minutes.
+> 
 > This has been a fun and personally rewarding project. Gemini 2.5 and I wrote over 10k lines of code for this server over a period of let's say 36 hours give or take. I cannot even type that fast. I was introduced to many new Python packages and Gemini explained how and why they were being implemented. To learn this on my own would have required several days of researching them, then trying them out, and ultimately incorporating in my solution. Again, with an AI peer coder and mentor, it took only minutes and over the course of the project hours to learn.
+> 
 >  If you choose to read through the complete thread below, take your time. There is a lot of material and if you review the reasoning part of how Gemini thought through each component, there is much to learn, even if you are a seasoned Python developer.
+> 
 > I hope you enjoy this as much as I have. For thos of you wanting a more structured approach to building the server, I have also broken out the materials as a step-by-step guide.
 
 ***
