@@ -79,10 +79,20 @@
 
 This structured approach ensures that the foundation is solid before adding more complex features.
 
+**[Step A: Environment Setup](instructions/environment_setup_quickstart.md)**
+
+**[Step B: CUDA Environment Setup](instructions/cuda_environment_setup_guide.md)**
+
+**[Step C: Required Python Package Installation](instructions/python_required_packages_installation.md)**
+
+**[Step D: Glossary of Terms](instructions/glossary.md)**
+
+***
+    
 **[Step 1: Basic Server Structure (FastAPI)](instructions/step_01_basic_server_structure.md)**
 
-    * **What:** Set up a minimal FastAPI application (`app/main.py`) run by Uvicorn. Created a root endpoint (`/`).
-    * **Why:** To establish the core web server framework using a modern, high-performance, async-capable library. Provides basic API structure and automatic documentation (`/docs`).
+    *   What: Set up a minimal FastAPI application (`app/main.py`) run by Uvicorn. Created a root endpoint (`/`).
+    *   Why: To establish the core web server framework using a modern, high-performance, async-capable library. Provides basic API structure and automatic documentation (`/docs`).
 
 **[Step 2: Configuration & Database Initialization](instructions/step_02_configuration_and_database_init.md)**
 
@@ -133,3 +143,5 @@ This structured approach ensures that the foundation is solid before adding more
 
     *   **What:** Integrated validation of HuggingFace Token from either HuggingFace local cache or .env file (`app/api/endpoints/system.py`). 
     *   **Why:** To simplify the process of accessing HuggingFace Hub private models that require token.
+
+**[Citations and Additional References](instructions/citations_and_references.md)**
