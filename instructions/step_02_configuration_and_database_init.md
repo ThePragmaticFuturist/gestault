@@ -1,4 +1,4 @@
-**Step 2: Configuration and Database Initialization**
+# Step 2: Configuration and Database Initialization #
 
 1.  **Install Dependencies:**
     ```bash
