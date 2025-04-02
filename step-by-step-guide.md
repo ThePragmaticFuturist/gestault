@@ -148,9 +148,14 @@ This structured approach ensures that the foundation is solid before adding more
 *   **What:** Created API endpoints (`app/api/endpoints/system.py`) and a service (`services/system_service.py`) using `psutil` and `pynvml` to report CPU, RAM, Disk, GPU (optional), and Temperature (optional) metrics. Added NVML shutdown to the FastAPI shutdown event.
 *   **Why:** To provide visibility into the server's resource usage and operational health, aiding monitoring and debugging.
 
-**[Step 11: Optional - Validate HuggingFace Login Token for LLM Access ](instructions/step_11_optional_huggingface_token.md)**
+**[Step 11: (Optional) Validate HuggingFace Login Token for LLM Access ](instructions/step_11_optional_huggingface_token.md)**
 
 *   **What:** Integrated validation of HuggingFace Token from either HuggingFace local cache or .env file (`app/api/endpoints/system.py`). 
 *   **Why:** To simplify the process of accessing HuggingFace Hub private models that require token.
+
+**[Step 12: (Optional) Future Features and Enhancements ](instructions/xtra_credit_future_features.md)**
+
+*   **What:** Once the foundational server is built, try these additional features and enhancements. 
+*   **Why:** The server you built is just a starting point for learning all about generative AI and LLMs.
 
 **[Citations and Additional References](instructions/citations_and_references.md)**
