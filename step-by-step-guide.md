@@ -79,7 +79,11 @@
     *   How to handle threading for chat sessions? FastAPI is async, which handles I/O-bound concurrency well. CPU-bound tasks (like LLM inference) might need `run_in_threadpool` or separate worker processes later, but don't overcomplicate the initial setup. Acknowledge threading is needed *later*.
     *   Error handling? Add basic exception handlers later. Focus on the core structure first.
 
-This structured approach ensures that the foundation is solid before adding more complex features.
+This structured approach ensures that the foundation is solid before adding more complex features.  
+
+  
+
+![Web API interface for Gestault RAG LLM Server](instructions/web_interface.png)  
 
 ***
 
