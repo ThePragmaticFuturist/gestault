@@ -86,7 +86,7 @@ graph TD
 
 *   **Trigger:** `POST /api/v1/documents/upload` with file data.
 
-```mermaid
+```
 sequenceDiagram
     participant Client
     participant API (FastAPI /documents)
@@ -139,7 +139,7 @@ sequenceDiagram
 
 *   **Trigger:** `POST /api/v1/documents/search/semantic` with query data.
 
-```mermaid
+```
 sequenceDiagram
     participant Client
     participant API (FastAPI /documents)
@@ -169,7 +169,7 @@ sequenceDiagram
 
 *   **Trigger:** `POST /api/v1/models/load` with `model_name_or_path`. (Server `LLM_BACKEND_TYPE` is `local`).
 
-```mermaid
+```
 sequenceDiagram
     participant Client
     participant API (FastAPI /models)
@@ -215,7 +215,7 @@ sequenceDiagram
 
 *   **Trigger:** `POST /api/v1/sessions/{session_id}/messages` with user message.
 
-```mermaid
+```
 sequenceDiagram
     participant Client
     participant API (FastAPI /sessions)
@@ -278,7 +278,7 @@ sequenceDiagram
 
 *   **Trigger:** `GET /api/v1/system/status`
 
-```mermaid
+```
 sequenceDiagram
     participant Client
     participant API (FastAPI /system)
