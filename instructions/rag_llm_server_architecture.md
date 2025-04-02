@@ -2,7 +2,9 @@
 
 **1. High-Level Server Architecture Diagram**
 
-This diagram shows the main subsystems and their primary interactions.
+
+
+![This diagram shows the main subsystems and their primary interactions.](https://images.unsplash.com/photo-1415604934674-561df9abf539?ixlib=rb-1.2.1&ixid=eyJhcHBfaWQiOjEyMDd9&auto=format&fit=crop&w=100&q=80 "Title text")
 
 ```
 graph TD
