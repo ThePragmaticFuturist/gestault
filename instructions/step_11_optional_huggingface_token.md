@@ -1,4 +1,4 @@
-**Solution: Add Startup Login Check**
+# Solution: Add Startup Login Check #
 
 Ensure the Hugging Face login (which stores a token locally) is done *before* the server potentially tries to load gated models. The best place is at the very beginning of the FastAPI startup event.
 
