@@ -1,4 +1,4 @@
-**Environment Setup Quick Start Guide**
+# Environment Setup Quick Start Guide #
 
 This guide assumes you have the server code available (e.g., cloned from a Git repository).
 
