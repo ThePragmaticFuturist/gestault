@@ -1,4 +1,4 @@
-**Step 5: Implement Search Endpoints**
+# Step 5: Implement Search Endpoints #
 
 Okay, let's implement the keyword and semantic search endpoints. We'll add these to the existing document router for now.
 
