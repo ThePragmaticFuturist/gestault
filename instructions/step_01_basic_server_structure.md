@@ -1,7 +1,9 @@
 # The Most Logical Starting Point: The Basic Server Structure #
 
 Before we can handle documents, models, or chats, we need the fundamental web server framework in place. This will be the skeleton upon which we'll hang all the other features. We'll use **FastAPI** for this, as it's modern, fast, asynchronous (great for I/O-bound tasks like network requests and potentially waiting for LLMs), and has excellent built-in documentation features.
-
+  
+[Reasoning behind the code](reasoning/r1.md)  
+  
 **Step 1: Project Setup and Basic FastAPI App**
 
 1.  **Create Project Directory:**
