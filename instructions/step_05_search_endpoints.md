@@ -2,9 +2,9 @@
 
 There are two types of search:
 
-    **Keyword Search** – basic, fast, just checks if your search words are found in any chunk of text.
+1.   **Keyword Search** – basic, fast, just checks if your search words are found in any chunk of text.
 
-    **Semantic Search** – smarter, uses AI to understand what you're looking for, even if the exact words don’t match.
+2.   **Semantic Search** – smarter, uses AI to understand what you're looking for, even if the exact words don’t match.
 
 You're using FastAPI, Pydantic, SQLAlchemy, and ChromaDB (a vector database for semantic search). 
 
