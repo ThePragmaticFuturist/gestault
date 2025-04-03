@@ -648,6 +648,8 @@ We have now successfully integrated vector embedding:
 
 ---
 
+## High-Level Design Philosophy
+
 ### 1. **Why Use Vector Embeddings?**
 
 **Theory:**  
