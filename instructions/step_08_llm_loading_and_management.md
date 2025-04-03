@@ -821,39 +821,101 @@ ASSISTANT RESPONSE:"""
     }
 
     # Check LLM status before attempting generation
-    llm_status = get_llm_status() # Get current status dict
-    if llm_status["status"] != LLMStatus.LOADED.value:
-        error_detail = f"LLM not ready (Status: {llm_status['status']}). Please load a model first."
-        logger.warning(f"[Session:{session_id}] {error_detail}")
-        assistant_response_content = f"[ERROR: {error_detail}]"
-        assistant_message_metadata["llm_call_error"] = error_detail
+    llm_status_data = get_llm_status()
+    tokenizer = llm_state.get("tokenizer") # Get tokenizer object from state
+    max_length = llm_state.get("max_model_length")
+    model_name = llm_status_data.get("model_name_or_path", "N/A")
+
+    if llm_status_data["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
+        # Handle case where LLM/tokenizer isn't ready (though should be checked before generation too)
+        logger.error(f"LLM/Tokenizer not ready for prompt construction. Status: {llm_status_data['status']}")
+        # Cannot proceed with prompt construction, maybe store error message?
+        # For now, we'll let the later check handle the generation block.
+        prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
+
     else:
-        try:
-            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{llm_status['model_name_or_path']}'...")
-            # Run the potentially blocking LLM generation in an executor thread
-            loop = asyncio.get_running_loop()
-            llm_response = await loop.run_in_executor(
-                None,  # Use default ThreadPoolExecutor
-                generate_text, # The function to run
-                prompt_for_llm # The argument(s) for the function
-            )
+        # --- Define Prompt Components ---
+        # Estimate tokens needed for instruction, markers, query, and response buffer
+        # This is an approximation; actual token count depends on specific words.
+        instruction_text = "You are a helpful AI assistant. Respond to the user's query based on the provided context and chat history."
+        user_query_text = user_message_content
+        # Reserve tokens for instruction, markers, query, and some buffer for the response itself
+        # Let's reserve ~150 tokens for non-context/history parts + response buffer
+        # And also account for the model's requested max_new_tokens
+        generation_config = llm_status_data.get("generation_config", {})
+        max_new_tokens = generation_config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS)
+        reserved_tokens = 150 + max_new_tokens
+        max_context_history_tokens = max_length - reserved_tokens
+        logger.info(f"Max Length: {max_length}, Reserved: {reserved_tokens}, Available for Context/History: {max_context_history_tokens}")
 
-            if llm_response is None:
-                # Generation failed within the service (error already logged there)
-                raise Exception("LLM generation failed or returned None.")
+        # --- Tokenize and Truncate Components ---
+        # 1. RAG Context: Truncate if needed
+        rag_context_tokens = []
+        if rag_context and rag_context != "[RAG search failed]":
+            rag_context_tokens = tokenizer.encode(f"\n### CONTEXT:\n{rag_context}", add_special_tokens=False)
+            if len(rag_context_tokens) > max_context_history_tokens:
+                logger.warning(f"Truncating RAG context ({len(rag_context_tokens)} tokens) to fit limit.")
+                rag_context_tokens = rag_context_tokens[:max_context_history_tokens]
+                # Optional: Decode back to string to see truncated context? Might be slow.
+                # rag_context = tokenizer.decode(rag_context_tokens) # Use truncated context text
 
-            assistant_response_content = llm_response
-            logger.info(f"[Session:{session_id}] Received response from LLM.")
-            logger.debug(f"[Session:{session_id}] LLM Response:\n{assistant_response_content[:500]}...")
+        available_tokens_for_history = max_context_history_tokens - len(rag_context_tokens)
 
-        except Exception as e:
-            error_detail = f"LLM generation failed: {type(e).__name__}"
-            logger.error(f"[Session:{session_id}] {error_detail}: {e}", exc_info=True)
-            assistant_response_content = f"[ERROR: {error_detail}]"
-            assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}"
+        # 2. Chat History: Truncate from the OLDEST messages if needed
+        chat_history_tokens = []
+        if chat_history_str:
+            # Start with full history prompt part
+            full_history_prompt = f"\n### CHAT HISTORY:\n{chat_history_str}"
+            chat_history_tokens = tokenizer.encode(full_history_prompt, add_special_tokens=False)
+            if len(chat_history_tokens) > available_tokens_for_history:
+                 logger.warning(f"Truncating chat history ({len(chat_history_tokens)} tokens) to fit limit.")
+                 # Simple truncation: keep only the last N tokens
+                 chat_history_tokens = chat_history_tokens[-available_tokens_for_history:]
+                 # More robust: Re-tokenize messages one by one from recent to old until limit hit? Too complex for now.
 
-    # --- ### END MODIFIED SECTION ### ---
+        # --- Assemble Final Prompt (using tokens is safer, but harder to format) ---
+        # For simplicity, let's assemble with potentially truncated *strings* derived from tokens
+        # NOTE: Decoding tokens back to strings might introduce slight changes / tokenization artifacts.
+        # A more advanced method would keep everything as token IDs until the final input.
 
+        final_prompt_parts = []
+        final_prompt_parts.append("### INSTRUCTION:")
+        final_prompt_parts.append(instruction_text)
+
+        if rag_context_tokens:
+             # Decode the potentially truncated RAG context tokens
+             decoded_rag_context_header = tokenizer.decode(tokenizer.encode("\n### CONTEXT:", add_special_tokens=False))
+             decoded_rag_context_body = tokenizer.decode(rag_context_tokens[len(tokenizer.encode(decoded_rag_context_header, add_special_tokens=False)):])
+             final_prompt_parts.append(decoded_rag_context_header + decoded_rag_context_body)
+
+
+        if chat_history_tokens:
+            # Decode the potentially truncated chat history tokens
+            decoded_hist_header = tokenizer.decode(tokenizer.encode("\n### CHAT HISTORY:", add_special_tokens=False))
+            decoded_hist_body = tokenizer.decode(chat_history_tokens[len(tokenizer.encode(decoded_hist_header, add_special_tokens=False)):])
+            final_prompt_parts.append(decoded_hist_header + decoded_hist_body)
+
+
+        final_prompt_parts.append("\n### USER QUERY:")
+        final_prompt_parts.append(user_query_text)
+        final_prompt_parts.append("\n### RESPONSE:")
+
+        prompt_for_llm = "\n".join(final_prompt_parts)
+
+        # Final Token Check (Optional but recommended)
+        final_tokens = tokenizer.encode(prompt_for_llm)
+        final_token_count = len(final_tokens)
+        logger.info(f"Constructed final prompt with {final_token_count} tokens (Max allowed for input: {max_length - max_new_tokens}).")
+        if final_token_count >= max_length:
+            # This shouldn't happen often with the truncation, but as a safeguard:
+            logger.error(f"FATAL: Final prompt ({final_token_count} tokens) still exceeds model max length ({max_length}). Truncating forcefully.")
+            # Forcefully truncate the token list (might cut mid-word)
+            truncated_tokens = final_tokens[:max_length - 5] # Leave a tiny buffer
+            prompt_for_llm = tokenizer.decode(truncated_tokens)
+            logger.debug(f"Forcefully truncated prompt:\n{prompt_for_llm}")
+
+
+    logger.debug(f"[Session:{session_id}] Constructed prompt for LLM (Token Count: {final_token_count if 'final_token_count' in locals() else 'N/A'}):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}")
 
     # --- Store Assistant Message (Using actual or error response) ---
     try:
