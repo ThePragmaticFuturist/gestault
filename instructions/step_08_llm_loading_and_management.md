@@ -1,5 +1,7 @@
 # Step 8: LLM Loading and Management #
-
+   
+[Reasoning behind the code](reasoning/r8.md)
+   
 Okay, let's create the LLM loading and management API. This will involve:
 
 1.  Defining configurations for models.
