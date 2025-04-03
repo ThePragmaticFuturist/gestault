@@ -1,7 +1,9 @@
 # Step 5: Implement Search Endpoints #
 
 Okay, let's implement the keyword and semantic search endpoints. We'll add these to the existing document router for now.
-
+   
+[Reasoning behind the code](reasoning/r5.md)
+   
 1.  **No New Dependencies:** We should have all necessary libraries installed already.
 
 2.  **Define Search Request/Response Models (`app/api/endpoints/documents.py`):**
