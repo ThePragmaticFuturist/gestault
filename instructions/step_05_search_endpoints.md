@@ -272,6 +272,8 @@ We have now added core search capabilities:
 
 ---
 
+# High-Level Design Philosophy
+
 | **Concept**            | **What It Does**                                              |
 |------------------------|---------------------------------------------------------------|
 | `SearchQuery`          | Defines what the user sends when searching                    |
