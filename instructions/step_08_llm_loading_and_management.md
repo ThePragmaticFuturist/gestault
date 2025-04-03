@@ -1,4 +1,27 @@
 # Step 8: LLM Loading and Management #
+
+---
+
+## THE BIG IDEA: *Separation of Concerns + Modularity + Async I/O*
+
+You’re building a **modular, asynchronous, retrieval-augmented LLM system** that:
+
+- Keeps core responsibilities separated (e.g., session management, document storage, LLM orchestration)
+- Treats the **LLM as a pluggable backend**, not the monolith
+- Runs efficiently, even with heavy tasks like inference and search
+- Enables **streaming**, **load balancing**, and **model swapping** down the line
+
+---
+
+## Analogy: Your Server is Like a Brain with Working Memory
+
+- **LLM = language cortex** (fluid, creative, but not “aware”)
+- **Chroma = long-term memory** (fast recall of document facts)
+- **Session DB = short-term memory** (tracks what we just talked about)
+- **LLM Service = brainstem** (manages energy, model switching, device use)
+- **Prompt Constructor = executive function** (organizes all inputs into a coherent thought)
+
+---
    
 [Reasoning behind the code](reasoning/r8.md)
    
