@@ -124,6 +124,15 @@ Before we can handle documents, models, or chats, we need the fundamental web se
 5.  **Return Value:** The function returns a Python dictionary. FastAPI automatically converts this dictionary into a JSON response.
 6.  **`if __name__ == "__main__":`:** This standard Python construct allows the script to be run directly. When you execute `python main.py`, this block runs. We use it here to start the `uvicorn` server programmatically, although running `uvicorn main:app --reload` from the terminal is more common during development. We added getting the port from an environment variable as good practice.
 7.  **Project Structure (Initial):** Right now, it's just `main.py` and `requirements.txt`. As we add features, we'll create subdirectories (like `app`, `core`, `services`, `models`, `db`) to keep the code organized.
+ 
+| Concept	| What It Means |
+| --------| --------------| 
+| FastAPI	| A Python tool to build web APIs easily and fast. | 
+| Uvicorn	| A server that runs your FastAPI app and makes it available on the web. | 
+| Route	| A path like / that a browser or app can request. | 
+| Endpoint	| A function that handles a specific route. | 
+| JSON	| A format to send and receive data between servers and browsers. | 
+| async | def	Makes functions faster and able to handle many users at once. | 
 
 **Next Steps:**
 
