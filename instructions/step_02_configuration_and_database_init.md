@@ -493,3 +493,95 @@
 *   Used FastAPI startup/shutdown events for database connection handling.
 *   Organized the code into `app`, `core`, and `db` directories.
 *   Ensured necessary data directories and database structures are created on startup.
+
+
+
+---
+
+## Flow of a User Request (Upload Document & Create Chat Session)  
+  
+Here's a high-level walkthrough of a user uploading a document and starting a chat session in your RAG LLM server setup, step by step:  
+
+![User Process Flow for Document Uploading and CHat](process_flow.png)
+  
+### **1. User sends a request**
+- **POST /api/v1/documents** with a document (PDF, TXT, etc.).
+- Or **POST /api/v1/sessions** to start a new chat session.
+
+---
+
+### **2. FastAPI App Receives Request**
+- The `app/main.py` FastAPI instance receives the request.
+- It routes to the appropriate handler (you'll define in `app/api/endpoints/` later).
+
+---
+
+### **3. Settings Loaded**
+- `from core.config import settings`
+- Ensures all directories exist.
+- Provides paths and names for DB, ChromaDB, model config.
+
+---
+
+### **4. Document Endpoint Logic**
+Example steps in document upload:
+```python
+# Pseudocode for upload handler
+document_id = generate_uuid()
+save_file_to_disk(file, settings.DATA_DIR / document_id)
+```
+
+---
+
+### **5. Save Document Metadata to SQLite**
+- Insert a row into `documents` table in `rag_server.db`:
+```sql
+INSERT INTO documents (id, filename, upload_time, ...) VALUES (...);
+```
+
+---
+
+### **6. Extract & Chunk Text**
+- The file is read, split into chunks (e.g., 500 tokens each).
+
+---
+
+### **7. Embed Chunks into Vectors**
+- Each chunk is passed to a model (e.g., Hugging Face transformer).
+- Vector embeddings are generated.
+
+---
+
+### **8. Save Chunks to ChromaDB**
+- Chunks with their metadata (chunk index, source doc ID) are saved using:
+```python
+chroma_client.get_or_create_collection("rag_documents")
+collection.add(documents=[...], embeddings=[...])
+```
+
+---
+
+### **9. Create Chat Session (optional but common)**
+- A `POST /api/v1/sessions` call inserts a new row in `sessions`.
+- Stores model name, timestamp, related document IDs.
+
+---
+
+### **10. Server Responds**
+- FastAPI sends a JSON response:
+```json
+{
+  "status": "success",
+  "session_id": "abc123",
+  "document_id": "xyz789"
+}
+```
+
+---
+
+### **Next User Prompt Flow**
+When user sends a prompt:
+- Find matching documents by querying ChromaDB for similar embeddings.
+- Use them to generate a RAG-style response from your LLM.
+- Save chat exchange in `chat_messages`.
+
