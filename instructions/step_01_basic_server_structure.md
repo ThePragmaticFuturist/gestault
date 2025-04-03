@@ -116,6 +116,8 @@ Before we can handle documents, models, or chats, we need the fundamental web se
     *   Go to `http://localhost:8000/redoc`. FastAPI also provides alternative documentation (ReDoc).
 
 
+        
+
 ## **Core Theory: Why Design the Server This Way?**
 
 Let’s break down **why** this server is being designed this way—from both a **software architecture** and **pragmatic AI deployment** perspective. This architecture is shaped by **best practices** in modern backend development, **AI systems engineering**, and **developer ergonomics**.   
