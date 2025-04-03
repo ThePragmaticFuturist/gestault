@@ -268,7 +268,7 @@ We have now added core search capabilities:
 
 ---
 
-![Search Flow](saerch_flow.png)
+![Search Flow](search_flow.png)
 
 ---
 
