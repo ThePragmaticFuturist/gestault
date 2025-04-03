@@ -585,3 +585,109 @@ When user sends a prompt:
 - Use them to generate a RAG-style response from your LLM.
 - Save chat exchange in `chat_messages`.
 
+---
+
+# Why design it this way? #  
+
+The architecture you’re building is based on several **best practices and architectural theories** that aim to create **scalable, maintainable, modular, and async-friendly** systems. Let's break this down into the core theoretical principles and design motivations behind each major decision:
+
+---
+
+## 1. **Separation of Concerns (SoC)**
+
+> **Theory:** Systems should separate logic into distinct sections with minimal overlap in responsibilities.
+
+### How it's applied:
+- `core/config.py` handles **only settings**.
+- `db/database.py` deals with **connections and setup**.
+- `db/models.py` defines **only the schema**.
+- `app/main.py` runs the **application** logic.
+- `api/endpoints/` (later) handles **routes and user interactions**.
+
+> **Why:** Makes your codebase easier to understand, test, and maintain. If one part breaks (like the database), it doesn’t break your whole app logic.
+
+---
+
+## 2. **Asynchronous I/O for Scalability**
+
+> **Theory:** Use non-blocking I/O to handle many concurrent connections without locking the entire process.
+
+### How it's applied:
+- Using `databases` and `aiosqlite` lets you handle requests without waiting for the DB to finish before serving another.
+
+> **Why:** Python's `async` is perfect for web APIs where you often wait on network, file, or DB operations. This improves **performance** and **user experience**, especially when many users are interacting at once.
+
+---
+
+## 3. **Modularity + Reusability**
+
+> **Theory:** Design reusable, single-purpose components (i.e., loosely coupled modules).
+
+### How it's applied:
+- `settings` can be reused across any part of your app (`settings.SERVER_PORT`, etc.).
+- `get_chroma_client()` and `get_sqlite_db()` act as clean injection points.
+
+> **Why:** Makes it easy to swap out components (e.g., switch to Postgres or Redis later) with minimal refactoring.
+
+---
+
+## 4. **Declarative Configuration with Pydantic**
+
+> **Theory:** Use declarative (not imperative) code for configs to reduce complexity and centralize logic.
+
+### How it's applied:
+- All settings are typed, validated, and overridable via `.env`.
+
+> **Why:** Prevents bugs due to misconfiguration. Easy to extend and introspect (e.g., environment overrides for staging vs production).
+
+---
+
+## 5. **Persistence and Fault Tolerance**
+
+> **Theory:** Systems must persist important state and recover gracefully on restart.
+
+### How it's applied:
+- ChromaDB and SQLite persist to disk (`data/` folder).
+- You ensure tables and folders exist on startup.
+
+> **Why:** This design makes your server **stateful and restart-safe**, which is key for handling long-lived sessions or storing uploaded documents.
+
+---
+
+## 6. **Retrieval-Augmented Generation (RAG) Theory**
+
+> **Theory (RAG):** Combine the power of retrieval (from documents) with generation (from LLMs) for grounded, dynamic responses.
+
+### How it's applied:
+- Upload → chunk → embed → store in ChromaDB.
+- On prompt: query vector DB → inject retrieved docs into LLM prompt.
+
+> **Why:** This allows your LLM to answer based on **custom, dynamic knowledge**, without fine-tuning the model.
+
+> Source: [Lewis et al., “Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks” (2020)](https://arxiv.org/abs/2005.11401)
+
+---
+
+## 7. **Initialization on Import**
+
+> **Theory:** Some systems should be initialized when the module loads (like config or ensuring folders exist).
+
+### How it's applied:
+- On import, `config.py` and `database.py` initialize necessary directories and ChromaDB collections.
+
+> **Why:** Prevents runtime errors due to missing folders or tables. Think of it like setting up your tools before using them.
+
+---
+
+## 8. **Minimal MVP, Maximum Scalability**
+
+> **Theory:** Start small and clean, but plan for scale.
+
+### How it's applied:
+- SQLite + ChromaDB are lightweight, but you’ve modularized everything (you can swap for Postgres + Milvus later).
+
+> **Why:** It’s easier to scale when your foundation is well-structured.
+
+---
+
+
