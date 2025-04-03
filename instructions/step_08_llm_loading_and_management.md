@@ -198,79 +198,67 @@ Okay, let's create the LLM loading and management API. This will involve:
         llm_state["load_error"] = None
         llm_state["load_config"] = {"device": device, "quantization": quantization} # Store load config
 
-
         try:
             load_start_time = time.time()
             quantization_config = None
-            model_kwargs = {"device_map": device if device != "cpu" else None} # Use device_map for non-CPU
-
+            pipeline_device_map = device if device != "cpu" else None
             if quantization:
-                if quantization == "8bit" and torch.cuda.is_available():
-                    quantization_config = BitsAndBytesConfig(load_in_8bit=True)
-                    logger.info("Applying 8-bit quantization.")
-                    # device_map='auto' might be better with quantization
-                    model_kwargs["device_map"] = "auto"
-                elif quantization == "4bit" and torch.cuda.is_available():
-                     quantization_config = BitsAndBytesConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_compute_dtype=torch.float16, # Or bfloat16 if supported
-                        bnb_4bit_quant_type="nf4",
-                        bnb_4bit_use_double_quant=True,
-                    )
-                     logger.info("Applying 4-bit quantization (nf4).")
-                     model_kwargs["device_map"] = "auto"
-                else:
-                    logger.warning(f"Quantization '{quantization}' requested but not supported or CUDA not available. Loading in full precision.")
-                    quantization = None # Reset quantization if not applied
-                    llm_state["load_config"]["quantization"] = None
-
-            # Use pipeline for simplicity, assumes text-generation task
-            # For more control, load Model and Tokenizer separately
+                 if quantization == "8bit" and torch.cuda.is_available():
+                     quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+                     logger.info("Applying 8-bit quantization.")
+                     pipeline_device_map = "auto"
+                 elif quantization == "4bit" and torch.cuda.is_available():
+                      quantization_config = BitsAndBytesConfig(
+                         load_in_4bit=True,
+                         bnb_4bit_compute_dtype=torch.float16,
+                         bnb_4bit_quant_type="nf4",
+                         bnb_4bit_use_double_quant=True,
+                     )
+                      logger.info("Applying 4-bit quantization (nf4).")
+                      pipeline_device_map = "auto"
+                 else:
+                     logger.warning(f"Quantization '{quantization}' requested but not supported or CUDA not available. Loading in full precision.")
+                     quantization = None
+                     llm_state["load_config"]["quantization"] = None
+    
+            # --- MODIFIED PIPELINE CALL (REMOVED cache_dir) ---
+            logger.info(f"Initializing pipeline with: model='{model_id}', device_map='{pipeline_device_map}', quantization_config={'Set' if quantization_config else 'None'}")
             new_pipeline = pipeline(
-                "text-generation",
+                task="text-generation",
                 model=model_id,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32, # Use float16 on GPU
+                device_map=pipeline_device_map,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
                 quantization_config=quantization_config,
-                trust_remote_code=True, # Be cautious with this setting
-                model_kwargs=model_kwargs,
-                # Use configured cache path for transformers models
-                cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve())
+                trust_remote_code=True,
+                # cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve()) # <<< REMOVED THIS ARGUMENT COMPLETELY
             )
-
-            # If not using device_map='auto' or pipeline places model on wrong device:
-            # if device != "cpu" and hasattr(new_pipeline, 'model'):
-            #      if str(new_pipeline.model.device) != device:
-            #          logger.info(f"Moving model explicitly to {device}")
-            #          new_pipeline.model.to(device)
-
-
+            # Model files will now be cached based on default Transformers behavior
+            # (e.g., ~/.cache/huggingface/hub or HF_HOME/TRANSFORMERS_CACHE env vars)
+            # --- END MODIFIED PIPELINE CALL ---
+    
             load_time = time.time() - load_start_time
             logger.info(f"Successfully loaded model '{model_id}' in {load_time:.2f} seconds.")
-
-            # Update state upon successful loading
+            # Store pipeline and update state
             llm_state["pipeline"] = new_pipeline
             llm_state["status"] = LLMStatus.LOADED
             llm_state["load_error"] = None
-            # Reset generation config to defaults when loading a new model
-            llm_state["config"] = {
+            llm_state["config"] = { # Reset generation config
                 "max_new_tokens": settings.DEFAULT_LLM_MAX_NEW_TOKENS,
                 "temperature": settings.DEFAULT_LLM_TEMPERATURE,
                 "top_p": settings.DEFAULT_LLM_TOP_P,
                 "top_k": settings.DEFAULT_LLM_TOP_K,
             }
-
+    
         except Exception as e:
             error_message = f"Failed to load model '{model_id}': {type(e).__name__}: {e}"
             logger.error(error_message, exc_info=True)
             llm_state["status"] = LLMStatus.FAILED
             llm_state["load_error"] = error_message
             llm_state["pipeline"] = None
-            llm_state["model_name_or_path"] = None # Clear model name on failure
-
+            llm_state["model_name_or_path"] = None
         finally:
             task_duration = time.time() - task_start_time
             logger.info(f"Model loading task for '{model_id}' finished in {task_duration:.2f} seconds. Status: {llm_state['status'].value}")
-
 
     # --- Public Service Functions ---
     def get_llm_status() -> Dict[str, Any]:
@@ -652,3 +640,257 @@ We now have an API for managing LLMs:
 **Next Step:**
 
 With the LLM management API in place, the clear next step is to **replace the placeholder LLM call** in the `add_message_to_session` endpoint (`app/api/endpoints/sessions.py`) with a call to our new `services.llm_service.generate_text` function. 
+
+**Modify `app/api/endpoints/sessions.py`:**
+
+We need to import the `generate_text` function and the `LLMStatus` enum from `llm_service`, call `generate_text` instead of the placeholder, and handle potential errors.
+
+```python
+# app/api/endpoints/sessions.py
+import uuid
+import logging
+import datetime
+from typing import List, Optional, Dict, Any
+import asyncio # Keep asyncio import
+
+from fastapi import APIRouter, HTTPException, Depends, status
+
+# Import models and db access
+from app.api.models.chat import (
+    SessionCreateRequest,
+    SessionMetadataResponse,
+    MessageCreateRequest,
+    ChatMessageResponse
+)
+from db.database import database, get_chroma_client
+from db.models import sessions_table, chat_messages_table, documents_table
+from core.config import settings
+# Import embedding and search functions/models if needed directly
+from services.embedding_service import generate_embeddings
+# --- MODIFIED IMPORTS ---
+# Import LLM service functions and status
+from services.llm_service import generate_text, get_llm_status, LLMStatus
+# --- END MODIFIED IMPORTS ---
+from app.api.endpoints.documents import SearchQuery
+import sqlalchemy
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# --- Helper Function (Keep as is) ---
+# ... get_session_or_404 ...
+
+# --- Session Endpoints (Keep as they are) ---
+# ... create_session, list_sessions, get_session, delete_session ...
+
+# --- Message Endpoints (within a session) ---
+
+@router.post(
+    "/{session_id}/messages",
+    response_model=ChatMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Send a message and get AI response (with RAG)",
+    description="Adds user message, performs RAG search, constructs prompt, calls LLM, "
+                "stores response, and returns the assistant message.",
+)
+async def add_message_to_session(
+    session_id: str,
+    message_data: MessageCreateRequest,
+):
+    """
+    Handles user message, RAG, LLM call, and stores conversation turn.
+    """
+    if message_data.role != "user":
+         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only 'user' role messages can be posted by the client.")
+
+    session = await get_session_or_404(session_id)
+    user_message_content = message_data.content
+    now = datetime.datetime.now(datetime.timezone.utc)
+    chroma_client = get_chroma_client()
+
+    # --- Store User Message (Keep as is) ---
+    try:
+        insert_user_message_query = chat_messages_table.insert().values(
+            session_id=session_id, timestamp=now, role="user", content=user_message_content, metadata=None,
+        ).returning(chat_messages_table.c.id)
+        user_message_id = await database.execute(insert_user_message_query)
+        logger.info(f"[Session:{session_id}] Stored user message (ID: {user_message_id}).")
+        update_session_query = sessions_table.update().where(sessions_table.c.id == session_id).values(last_updated_at=now)
+        await database.execute(update_session_query)
+    except Exception as e:
+        logger.error(f"[Session:{session_id}] Failed to store user message: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store user message.")
+
+    # --- Perform RAG Search (Keep as is) ---
+    rag_context = ""
+    rag_chunk_ids = []
+    rag_document_ids_in_session = session.get("rag_document_ids")
+    if rag_document_ids_in_session:
+        logger.info(f"[Session:{session_id}] Performing RAG search within documents: {rag_document_ids_in_session}")
+        try:
+            doc_collection = chroma_client.get_collection(settings.DOCUMENT_COLLECTION_NAME)
+            query_embedding = generate_embeddings([user_message_content])
+            if not query_embedding or not query_embedding[0]:
+                raise ValueError("Failed to generate query embedding for RAG.")
+            chroma_where_filter = {"document_id": {"$in": rag_document_ids_in_session}}
+            results = doc_collection.query(
+                query_embeddings=query_embedding, n_results=settings.RAG_TOP_K,
+                where=chroma_where_filter, include=['documents', 'metadatas', 'distances']
+            )
+            retrieved_docs = results.get('documents', [[]])[0]
+            retrieved_metadatas = results.get('metadatas', [[]])[0]
+            retrieved_ids = results.get('ids', [[]])[0]
+            if retrieved_docs:
+                rag_chunk_ids = retrieved_ids
+                context_parts = []
+                for i, doc_text in enumerate(retrieved_docs):
+                    metadata = retrieved_metadatas[i] if i < len(retrieved_metadatas) else {}
+                    source_info = f"Source(Doc: {metadata.get('document_id', 'N/A')}, Chunk: {metadata.get('chunk_index', 'N/A')})"
+                    context_parts.append(f"{source_info}:\n{doc_text}")
+                rag_context = "\n\n---\n\n".join(context_parts)
+                logger.info(f"[Session:{session_id}] Retrieved {len(retrieved_docs)} chunks for RAG context.")
+                logger.debug(f"[Session:{session_id}] RAG Context:\n{rag_context[:500]}...")
+        except Exception as e:
+            logger.error(f"[Session:{session_id}] RAG search failed: {e}", exc_info=True)
+            rag_context = "[RAG search failed]"
+    else:
+         logger.info(f"[Session:{session_id}] No RAG document IDs associated. Skipping RAG search.")
+
+    # --- Retrieve Chat History (Keep as is) ---
+    chat_history_str = ""
+    try:
+        history_limit = settings.CHAT_HISTORY_LENGTH * 2
+        history_query = chat_messages_table.select().where(
+            chat_messages_table.c.session_id == session_id
+        ).order_by(chat_messages_table.c.timestamp.desc()).limit(history_limit)
+        recent_messages = await database.fetch_all(history_query)
+        recent_messages.reverse()
+        if recent_messages:
+             history_parts = [f"{msg['role'].capitalize()}: {msg['content']}" for msg in recent_messages]
+             chat_history_str = "\n".join(history_parts)
+             logger.info(f"[Session:{session_id}] Retrieved last {len(recent_messages)} messages for history.")
+             logger.debug(f"[Session:{session_id}] Chat History:\n{chat_history_str[-500:]}...")
+    except Exception as e:
+        logger.error(f"[Session:{session_id}] Failed to retrieve chat history: {e}", exc_info=True)
+        chat_history_str = "[Failed to retrieve history]"
+
+    # --- Construct Prompt (Keep as is) ---
+    prompt_for_llm = f"""CONTEXT:
+{rag_context if rag_context else "No RAG context available."}
+
+CHAT HISTORY:
+{chat_history_str if chat_history_str else "No history available."}
+
+USER QUERY:
+{user_message_content}
+
+ASSISTANT RESPONSE:"""
+    logger.debug(f"[Session:{session_id}] Constructed prompt (first/last 200 chars):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}")
+
+
+    # --- ### MODIFIED SECTION: Call LLM Service ### ---
+
+    assistant_response_content = None
+    assistant_message_metadata = {
+        "prompt_preview": prompt_for_llm[:200] + "...",
+        "rag_chunks_retrieved": rag_chunk_ids,
+        "llm_call_error": None # Add field for potential errors
+    }
+
+    # Check LLM status before attempting generation
+    llm_status = get_llm_status() # Get current status dict
+    if llm_status["status"] != LLMStatus.LOADED.value:
+        error_detail = f"LLM not ready (Status: {llm_status['status']}). Please load a model first."
+        logger.warning(f"[Session:{session_id}] {error_detail}")
+        assistant_response_content = f"[ERROR: {error_detail}]"
+        assistant_message_metadata["llm_call_error"] = error_detail
+    else:
+        try:
+            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{llm_status['model_name_or_path']}'...")
+            # Run the potentially blocking LLM generation in an executor thread
+            loop = asyncio.get_running_loop()
+            llm_response = await loop.run_in_executor(
+                None,  # Use default ThreadPoolExecutor
+                generate_text, # The function to run
+                prompt_for_llm # The argument(s) for the function
+            )
+
+            if llm_response is None:
+                # Generation failed within the service (error already logged there)
+                raise Exception("LLM generation failed or returned None.")
+
+            assistant_response_content = llm_response
+            logger.info(f"[Session:{session_id}] Received response from LLM.")
+            logger.debug(f"[Session:{session_id}] LLM Response:\n{assistant_response_content[:500]}...")
+
+        except Exception as e:
+            error_detail = f"LLM generation failed: {type(e).__name__}"
+            logger.error(f"[Session:{session_id}] {error_detail}: {e}", exc_info=True)
+            assistant_response_content = f"[ERROR: {error_detail}]"
+            assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}"
+
+    # --- ### END MODIFIED SECTION ### ---
+
+
+    # --- Store Assistant Message (Using actual or error response) ---
+    try:
+        assistant_timestamp = datetime.datetime.now(datetime.timezone.utc)
+        insert_assistant_message_query = chat_messages_table.insert().values(
+            session_id=session_id,
+            timestamp=assistant_timestamp,
+            role="assistant",
+            content=assistant_response_content, # Use the actual or error content
+            metadata=assistant_message_metadata, # Include metadata with potential error
+        ).returning(chat_messages_table.c.id, *[c for c in chat_messages_table.c])
+
+        new_assistant_message_row = await database.fetch_one(insert_assistant_message_query)
+        if not new_assistant_message_row:
+            raise Exception("Failed to retrieve assistant message after insert.")
+
+        logger.info(f"[Session:{session_id}] Stored assistant message (ID: {new_assistant_message_row['id']}).")
+
+        # Update session timestamp
+        update_session_query_after_assist = sessions_table.update().where(sessions_table.c.id == session_id).values(
+             last_updated_at=assistant_timestamp
+        )
+        await database.execute(update_session_query_after_assist)
+
+        # Return the structured assistant message response
+        return ChatMessageResponse.parse_obj(dict(new_assistant_message_row))
+
+    except Exception as e:
+        logger.error(f"[Session:{session_id}] Failed to store assistant message: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store assistant response.")
+
+
+# --- List Messages Endpoint (Keep as is) ---
+# ... list_messages_in_session ...
+
+```
+
+**Explanation of Changes:**
+
+1.  **Imports:** Added imports for `generate_text`, `get_llm_status`, and `LLMStatus` from `services.llm_service`. Kept `asyncio`.
+2.  **LLM Status Check:** Before attempting generation, it now calls `get_llm_status()` to check if the model `status` is `LOADED`. If not, it sets an error message as the response content and records the error in the message metadata.
+3.  **Run LLM Call in Executor:**
+    *   The call to `generate_text(prompt_for_llm)` is wrapped in `await loop.run_in_executor(None, generate_text, prompt_for_llm)`.
+    *   This is **critical** because the LLM generation (`pipeline(...)` call inside `generate_text`) is CPU/GPU-bound and potentially long-running. Running it in an executor prevents it from blocking FastAPI's main async event loop, allowing the server to remain responsive to other requests.
+4.  **Error Handling:** A `try...except` block surrounds the `run_in_executor` call. If `generate_text` returns `None` (indicating internal failure) or if `run_in_executor` raises an exception, it catches the error, logs it, sets an error message as the `assistant_response_content`, and records the error details in the `assistant_message_metadata`.
+5.  **Store Response:** The code to store the assistant message now uses the `assistant_response_content` variable, which will contain either the actual LLM response or an error message. The `assistant_message_metadata` (including potential errors) is also stored.
+
+**How to Test:**
+
+1.  Restart the server: `uvicorn app.main:app --reload ...`
+2.  **Load a Model:** Use `POST /api/v1/models/load` to load an LLM (e.g., `gpt2`). Wait for the status (`GET /api/v1/models/status`) to become `Loaded`.
+3.  **Create a Session:** Create a session, optionally linking valid document IDs.
+4.  **Send a Message:** Use `POST /api/v1/sessions/{session_id}/messages` to send a user message.
+5.  **Observe Response:** This time, the response should contain text generated by the actual `gpt2` (or whichever model you loaded) based on the prompt (including RAG context if applicable). It won't be just the placeholder.
+6.  **Check Logs:** The server logs should show the call to the LLM service (`Sending prompt to LLM...`) and the received response (`Received response from LLM.`).
+7.  **Check DB:** The `chat_messages` table should contain the real assistant response. The metadata field might show `llm_call_error: null` if successful.
+8.  **Test Failure Cases:**
+    *   Try sending a message *without* loading an LLM first. The response should contain the `[ERROR: LLM not ready...]` message.
+    *   Try loading a very large model that might fail (e.g., due to memory). Send a message and see if the `[ERROR: LLM generation failed...]` message appears in the response.
+
+**Summary:**
+
+We have now connected the chat endpoint to the LLM service. User messages trigger RAG search, prompt construction, and a call to the loaded LLM (running asynchronously in an executor thread) to generate a response. The conversation, including the real LLM output or any errors encountered, is stored.
