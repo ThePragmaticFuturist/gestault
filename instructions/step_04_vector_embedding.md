@@ -644,6 +644,10 @@ We have now successfully integrated vector embedding:
 
 ---
 
+![RAG Document Processing](embeddin_flow.png)
+
+---
+
 ### 1. **Why Use Vector Embeddings?**
 
 **Theory:**  
