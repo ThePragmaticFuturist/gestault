@@ -964,3 +964,87 @@ async def shutdown_event():
 6.  **Switch Backends:** Change the `LLM_BACKEND_TYPE` config, restart the server, load a relevant model, and test chat again.
 
 This provides a flexible architecture to switch between local inference and various dedicated inference servers. Remember the concurrency warning about modifying config for summarization if using the local backend.
+
+***
+
+## How to use the `POST /api/v1/models/load` endpoint to connect to an online LLM service like Ollama or vLLM using this architecture. ##
+
+The key is understanding that the **type** of backend (local, ollama, vllm) is determined by the **server's configuration** (`settings.LLM_BACKEND_TYPE`), while the `POST /load` request tells the server **which specific model** to use *on that configured backend*.
+
+Here's the procedure:
+
+**1. Configure the Server:**
+
+*   **Choose Backend Type:** Decide which backend you want to use (e.g., `ollama`).
+*   **Set Environment Variables (or `.env` file):** Before starting the server, you need to tell it which backend type to use and provide the necessary URL.
+    *   **For Ollama:**
+        ```bash
+        # Set environment variables before running uvicorn
+        export LLM_BACKEND_TYPE="ollama"
+        export OLLAMA_BASE_URL="http://localhost:11434" # Or your Ollama server URL
+        # Now start the server
+        uvicorn app.main:app --reload ...
+        ```
+        Or, add these lines to your `.env` file:
+        ```.env
+        LLM_BACKEND_TYPE=ollama
+        OLLAMA_BASE_URL=http://localhost:11434
+        ```
+    *   **For vLLM:**
+        ```bash
+        # Set environment variables
+        export LLM_BACKEND_TYPE="vllm"
+        export VLLM_BASE_URL="http://localhost:8000" # Or your vLLM server URL
+        # Now start the server
+        uvicorn app.main:app --reload ...
+        ```
+        Or, add these lines to your `.env` file:
+        ```.env
+        LLM_BACKEND_TYPE=vllm
+        VLLM_BASE_URL=http://localhost:8000
+        ```
+*   **Restart Server:** If the server was already running, **restart it** so it picks up the new configuration from the environment variables or `.env` file. Check the startup logs to confirm it's using the correct `LLM Backend Type`.
+
+**2. Use the `POST /api/v1/models/load` Endpoint:**
+
+*   Now that the server knows it should be talking to Ollama (or vLLM), you use the `/load` endpoint to specify *which model on that remote server* you want to interact with.
+*   **Request Body:** You need to send a JSON body containing the `model_name_or_path`.
+    *   **`model_name_or_path`:** This value **must be the name of the model as recognized by the remote service**.
+        *   For **Ollama:** This is the model tag you use with `ollama run` or `ollama pull` (e.g., `"llama3"`, `"mistral"`, `"codellama:7b"`).
+        *   For **vLLM:** This often corresponds to the Hugging Face identifier or the path used when starting the vLLM server (e.g., `"meta-llama/Llama-2-7b-chat-hf"`, `"mistralai/Mistral-7B-Instruct-v0.1"`). Check your vLLM server's documentation or startup logs.
+    *   **`device` and `quantization`:** These fields in the request body are **ignored** when the server's `LLM_BACKEND_TYPE` is set to `ollama`, `vllm`, or `instructlab`. They only apply to the `local` backend. You can omit them or leave them as `null`.
+
+*   **Example Request (for Ollama, assuming server configured with `LLM_BACKEND_TYPE=ollama`):**
+    ```bash
+    curl -X 'POST' \
+      'http://localhost:YOUR_SERVER_PORT/api/v1/models/load' \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -d '{
+      "model_name_or_path": "llama3"
+    }'
+    ```
+
+*   **Example Request (for vLLM, assuming server configured with `LLM_BACKEND_TYPE=vllm`):**
+    ```bash
+    curl -X 'POST' \
+      'http://localhost:YOUR_SERVER_PORT/api/v1/models/load' \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -d '{
+      "model_name_or_path": "mistralai/Mistral-7B-Instruct-v0.1"
+    }'
+    ```
+
+**What Happens on the Server:**
+
+1.  The `load_or_set_model` endpoint receives the request.
+2.  It checks the *server's* configured `settings.LLM_BACKEND_TYPE`.
+3.  It calls `set_active_backend` with the type (e.g., "ollama") and the `model_name_or_path` from the request (e.g., "llama3").
+4.  `set_active_backend` unloads any previous backend.
+5.  It creates an instance of the appropriate backend class (e.g., `OllamaBackend(url, "llama3")`).
+6.  It stores this instance in `llm_state["backend_instance"]`.
+7.  It updates the global `llm_state` (`backend_type`, `active_model`, `status` to `READY`).
+8.  The API returns a 202 response confirming the backend is configured.
+
+Now, when you send messages to a chat session, the `generate_text` function in `llm_service` will see the active backend is `OllamaBackend` (or `VLLMBackend`) and will call *its* `generate` method, which in turn makes the API call to the external Ollama/vLLM server using the configured model name (`llama3` in the example).
