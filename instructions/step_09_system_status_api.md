@@ -1,7 +1,9 @@
 # Step 9: System Status API #
 
 Okay, let's implement the System Status API. We'll use the `psutil` library, which is excellent for gathering cross-platform system information, and optionally `pynvml` for detailed NVIDIA GPU stats if available.
-
+   
+[Reasoning behind the code](reasoning/r9.md)
+   
 1.  **Install Dependencies:**
     ```bash
     pip install psutil pynvml
