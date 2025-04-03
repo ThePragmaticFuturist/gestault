@@ -458,8 +458,10 @@ We have now established the basic framework for managing chat sessions:
 - **Helper Functions** = Reduce code repetition and improve clarity.
 - **Transactions** = Ensure database changes are safe and atomic.
 - **API Docs (`/docs`)** = Test your API interactively.
-  
-## High-Level Design Philosophy
+
+---
+
+# High-Level Design Philosophy
 
 We're building this backend using principles from:
 
