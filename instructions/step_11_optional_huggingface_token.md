@@ -1,7 +1,9 @@
 # Solution: Add Startup Login Check #
 
 Ensure the Hugging Face login (which stores a token locally) is done *before* the server potentially tries to load gated models. The best place is at the very beginning of the FastAPI startup event.
-
+   
+[Reasoning behind the code](reasoning/r11.md)
+   
 **1. Modify `app/main.py`:**
 
 Add the check at the beginning of the `startup_event` function.
