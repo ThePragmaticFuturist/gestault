@@ -1225,8 +1225,6 @@ This provides a much more comprehensive view of the models readily available to 
 
 ## UNDERLYING THEORIES
 
----
-
 ### 1. **Retrieval-Augmented Generation (RAG) Theory**
 
 **Problem:** LLMs are stateless and expensive to train on your own data.  
