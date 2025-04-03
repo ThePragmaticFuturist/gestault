@@ -749,7 +749,7 @@ Adjust models to reflect the new state structure.
 ```python
 # app/api/models/llm.py
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 # from services.llm_service import LLMStatus # No longer need Enum here
 
 class ModelLoadRequest(BaseModel):
@@ -1048,3 +1048,257 @@ Here's the procedure:
 8.  The API returns a 202 response confirming the backend is configured.
 
 Now, when you send messages to a chat session, the `generate_text` function in `llm_service` will see the active backend is `OllamaBackend` (or `VLLMBackend`) and will call *its* `generate` method, which in turn makes the API call to the external Ollama/vLLM server using the configured model name (`llama3` in the example).
+
+
+## Modify the server to allow selecting the backend type via the API request body for `POST /models/load`, with `local` as the default if not specified ##
+
+**1. Modify Configuration (`core/config.py`)**
+
+Adjust the description for `LLM_BACKEND_TYPE` to clarify its role as a default. The `DEFAULT_MODEL_NAME_OR_PATH` becomes more important as a fallback.
+
+```python
+# core/config.py
+# ... (imports) ...
+
+class Settings(BaseSettings):
+    # ... (other settings) ...
+
+    # --- LLM Settings ---
+    LLM_BACKEND_TYPE: Literal["local", "ollama", "vllm", "instructlab"] = Field(
+        default="local",
+        description="The default LLM backend to use if not specified in the /load request ('local', 'ollama', 'vllm', 'instructlab')." # Updated description
+    )
+    # Base URLs still needed from config
+    OLLAMA_BASE_URL: Optional[str] = Field(default="http://localhost:11434", ...)
+    VLLM_BASE_URL: Optional[str] = Field(default=None, ...)
+    INSTRUCTLAB_BASE_URL: Optional[str] = Field(default=None, ...)
+
+    DEFAULT_MODEL_NAME_OR_PATH: str = Field(
+        default="gpt2", # Default model if none specified in /load request
+        description="Default model identifier used if none is provided in the /load request (HF ID, local path, or name on API backend)." # Updated description
+    )
+    # Local specific settings remain
+    LOCAL_MODELS_DIR: Path = BASE_DIR / "local_models"
+    LLM_DEVICE: str = Field(default_factory=get_default_device)
+    DEFAULT_LLM_QUANTIZATION: Optional[str] = Field(default=None)
+
+    # Generation parameters remain
+    # ... (DEFAULT_LLM_MAX_NEW_TOKENS, etc.) ...
+
+    class Config:
+        # ... (Config remains same) ...
+
+settings = Settings()
+
+# ... (Ensure directories exist) ...
+# ... (Print relevant config) ...
+print(f"Default LLM Backend Type: {settings.LLM_BACKEND_TYPE}") # Clarify this is the default
+# ...
+
+```
+
+**2. Modify API Model (`app/api/models/llm.py`)**
+
+Add the optional `backend_type` field to `ModelLoadRequest`. Also make `model_name_or_path` optional, so we can rely on the default from `settings`.
+
+```python
+# app/api/models/llm.py
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Literal # Import Literal
+
+# ... (BackendDetails, ModelStatusResponse, ModelUpdateRequest, AvailableModelsResponse remain the same) ...
+
+class ModelLoadRequest(BaseModel):
+    # --- NEW: Optional backend type selection ---
+    backend_type: Optional[Literal["local", "ollama", "vllm", "instructlab"]] = Field(
+        default=None,
+        description="Specify the backend type to use. If None, uses the server's configured default."
+    )
+    # --- model_name_or_path is now optional ---
+    model_name_or_path: Optional[str] = Field(
+        default=None, # Default to None, will use server default if not provided
+        description="Identifier for the model (HF ID, path for 'local'; model name for API backends). If None, uses server's default model."
+    )
+    # Device/Quantization remain optional, only relevant for 'local'
+    device: Optional[str] = Field(default=None, ...)
+    quantization: Optional[str] = Field(default=None, ...)
+
+```
+
+**3. Modify API Endpoint (`app/api/endpoints/models.py`)**
+
+Update the `load_or_set_model` endpoint to handle the optional `backend_type` and `model_name_or_path` from the request.
+
+```python
+# app/api/endpoints/models.py
+import logging
+import asyncio
+from typing import Dict, Any
+
+from fastapi import APIRouter, HTTPException, BackgroundTasks, status
+
+# Import models and service functions
+from app.api.models.llm import (
+    ModelLoadRequest, ModelStatusResponse, ModelUpdateRequest, AvailableModelsResponse
+)
+from services.llm_service import (
+    list_local_models, list_cached_hub_models,
+    set_active_backend,
+    get_llm_status, update_llm_config,
+    llm_state, LLMStatus
+)
+from core.config import settings
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# ... (@router.get("/available") remains the same) ...
+
+@router.post(
+    "/load",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Set active LLM backend and model",
+)
+async def load_or_set_model(
+    load_request: ModelLoadRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Sets the active LLM backend and configures the model.
+    Uses backend_type from request body, or falls back to server default.
+    Uses model_name_or_path from request body, or falls back to server default.
+    For 'local' backend, initiates background loading.
+    Unloads any previously active backend first.
+    """
+    current_status = llm_state["status"]
+    if current_status == LLMStatus.LOADING or current_status == LLMStatus.UNLOADING:
+         raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot change model/backend: Task already in progress (Status: {current_status.value}). Please wait."
+        )
+
+    # --- Determine Backend Type and Model ---
+    # Use requested type, otherwise fall back to server's configured default type
+    backend_type = load_request.backend_type or settings.LLM_BACKEND_TYPE
+    # Use requested model, otherwise fall back to server's configured default model
+    model_id = load_request.model_name_or_path or settings.DEFAULT_MODEL_NAME_OR_PATH
+
+    # Ensure a valid model ID is determined
+    if not model_id:
+         raise HTTPException(
+            status_code=400,
+            detail="No model_name_or_path provided in request and no DEFAULT_MODEL_NAME_OR_PATH configured on server."
+        )
+
+    # Device/Quantization only relevant if final backend type is 'local'
+    device = load_request.device
+    quantization = load_request.quantization
+    # --- End Determination ---
+
+    logger.info(f"Request received to activate model '{model_id}' on effective backend '{backend_type}'.")
+    logger.debug(f" (Source: Request Type='{load_request.backend_type}', Server Default Type='{settings.LLM_BACKEND_TYPE}')")
+    logger.debug(f" (Source: Request Model='{load_request.model_name_or_path}', Server Default Model='{settings.DEFAULT_MODEL_NAME_OR_PATH}')")
+
+
+    try:
+        # Pass the *determined* backend_type and model_id to the service
+        await set_active_backend(
+            backend_type=backend_type,
+            model_name_or_path=model_id,
+            device=device, # Only used if backend_type is 'local'
+            quantization=quantization # Only used if backend_type is 'local'
+        )
+    except ValueError as e:
+         logger.error(f"Configuration error setting backend: {e}")
+         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error setting backend: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to set active backend.")
+
+    # Return status based on outcome
+    final_status = get_llm_status()
+    # ... (rest of the response logic based on final_status - unchanged) ...
+    if final_status["status"] == LLMStatus.FAILED.value:
+         return { # Return dict directly for 202 with body
+            "message": f"Backend configuration for '{model_id}' on '{backend_type}' failed. Check server logs and status endpoint.",
+            "status": final_status
+         }
+    elif final_status["status"] == LLMStatus.LOADING.value: # Only happens for local
+          return {
+            "message": f"Local model loading initiated for '{model_id}'. Check status endpoint.",
+            "status": final_status
+         }
+    else: # Should be READY for API backends or successful immediate local load (unlikely)
+        return {
+            "message": f"Backend '{backend_type}' configured with model '{model_id}'. Status: {final_status['status']}",
+            "status": final_status
+        }
+
+
+# ... (@router.get("/status") remains the same) ...
+# ... (@router.get("/config") remains the same) ...
+# ... (@router.put("/config") remains the same) ...
+
+```
+
+**Explanation of Changes:**
+
+1.  **Configuration:** `LLM_BACKEND_TYPE` in `settings` is now the *default* if the API request doesn't specify one. `DEFAULT_MODEL_NAME_OR_PATH` is the fallback model.
+2.  **API Model:** `ModelLoadRequest` now has optional `backend_type` and `model_name_or_path`.
+3.  **API Endpoint (`load_or_set_model`):**
+    *   It checks if `load_request.backend_type` was provided. If yes, it uses that. If `None`, it uses `settings.LLM_BACKEND_TYPE`.
+    *   It checks if `load_request.model_name_or_path` was provided. If yes, it uses that. If `None`, it uses `settings.DEFAULT_MODEL_NAME_OR_PATH`.
+    *   It passes these *determined* values (`backend_type`, `model_id`) to the `set_active_backend` service function.
+    *   Device/Quantization are passed along but are only really used by `set_active_backend` if the final `backend_type` is `local`.
+
+**How to Use:**
+
+*   **Default Behavior (Use Server Config):**
+    *   Configure your server via `.env` or env vars (e.g., `LLM_BACKEND_TYPE=local`, `DEFAULT_MODEL_NAME_OR_PATH=gpt2`).
+    *   Send a `POST /api/v1/models/load` request with an empty body `{}` or omit the optional fields:
+        ```json
+        {}
+        ```
+        or
+        ```json
+        {
+          "device": null,
+          "quantization": null
+        }
+        ```
+    *   The server will use `local` as the backend and `gpt2` as the model.
+
+*   **Override Model (Keep Server Default Backend):**
+    *   Server configured with `LLM_BACKEND_TYPE=local`.
+    *   Send request:
+        ```json
+        {
+          "model_name_or_path": "distilgpt2"
+        }
+        ```
+    *   The server will use the `local` backend but load `distilgpt2`.
+
+*   **Override Backend & Model:**
+    *   Server might be configured for `local`.
+    *   Ensure Ollama is running with `llama3`.
+    *   Send request:
+        ```json
+        {
+          "backend_type": "ollama",
+          "model_name_or_path": "llama3"
+        }
+        ```
+    *   The server will ignore its default `local` setting, activate the `OllamaBackend`, and configure it to use the `llama3` model via the Ollama API URL from the settings.
+
+*   **Override Backend (Use Default Model for that Backend):**
+    *   Server configured for `local`, `DEFAULT_MODEL_NAME_OR_PATH=gpt2`.
+    *   Ensure Ollama is running.
+    *   Send request:
+        ```json
+        {
+          "backend_type": "ollama"
+        }
+        ```
+    *   The server will activate the `OllamaBackend` but use the *server's* `DEFAULT_MODEL_NAME_OR_PATH` ("gpt2" in this case) as the model name for Ollama API calls. **Note:** This requires the default model name to be valid for the chosen backend! It might be better practice to always specify the model when changing the backend type.
+
+This gives you the flexibility to switch models and target different running inference servers dynamically via the API, while still having sensible server-side defaults.
