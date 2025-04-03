@@ -397,7 +397,7 @@ The chat endpoint now performs the core RAG loop:
 
 ---
 
-# 
+# High-Level Design Philosophy
 
 ## 1. **Separation of Concerns**
 
