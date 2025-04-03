@@ -12,6 +12,8 @@ We’re building a chat session API using FastAPI, where:
 
 Imagine a simplified ChatGPT.
 
+![Chat Session Flow](chat.png)
+
 Let's create the API endpoints and database logic for managing chat sessions and their message history. We'll focus on storing the data correctly in our SQLite tables (`sessions` and `chat_messages`).
    
 [Reasoning behind the code](reasoning/r6.md)
