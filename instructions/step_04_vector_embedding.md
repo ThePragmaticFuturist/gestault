@@ -1,7 +1,9 @@
 # Step 4: Vector Embedding Integration #
 
 Let's add vector embedding to the pipeline. We'll use the popular `sentence-transformers` library to load a model from Hugging Face and generate embeddings, then store them in ChromaDB.
-
+   
+[Reasoning behind the code](reasoning/r4.md)
+   
 1.  **Install Dependencies:**
     ```bash
     pip install sentence-transformers torch torchvision torchaudio
