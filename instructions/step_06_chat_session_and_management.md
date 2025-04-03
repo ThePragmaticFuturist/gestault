@@ -10,9 +10,9 @@ We’re building a chat session API using FastAPI, where:
 
 *    We can later retrieve or delete those sessions and messages.
 
-Imagine it like how chat works in ChatGPT, but simplified.
+Imagine a simplified ChatGPT.
 
-Okay, let's create the API endpoints and database logic for managing chat sessions and their message history. We'll focus on storing the data correctly in our SQLite tables (`sessions` and `chat_messages`).
+Let's create the API endpoints and database logic for managing chat sessions and their message history. We'll focus on storing the data correctly in our SQLite tables (`sessions` and `chat_messages`).
    
 [Reasoning behind the code](reasoning/r6.md)
    
@@ -448,6 +448,13 @@ We have now established the basic framework for managing chat sessions:
 *   Correct handling of timestamps (`created_at`, `last_updated_at`) and relationships between sessions and messages.
 *   Use of transactions for data integrity (deleting sessions, adding messages).
 
+- **Pydantic Models** = Define the shape of the data.
+- **FastAPI Router** = Organizes endpoint logic.
+- **SQLite via SQLAlchemy** = Stores session and message data.
+- **Helper Functions** = Reduce code repetition and improve clarity.
+- **Transactions** = Ensure database changes are safe and atomic.
+- **API Docs (`/docs`)** = Test your API interactively.
+  
 **Next Steps:**
 
 The server can now store conversations. The next logical steps involve making the chat interactive and leveraging our RAG setup:
