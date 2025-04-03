@@ -109,7 +109,7 @@ Okay, let's create the LLM loading and management API. This will involve:
     from typing import Optional, Dict, Any, List
 
     import torch
-    from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+    from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
     from transformers import BitsAndBytesConfig # For quantization
 
     from core.config import settings
@@ -140,7 +140,8 @@ Okay, let's create the LLM loading and management API. This will involve:
             "top_k": settings.DEFAULT_LLM_TOP_K,
         },
         "load_error": None,
-        "load_config": {} # Holds the config used *during loading* (device, quantization)
+        "load_config": {}, # Holds the config used *during loading* (device, quantization)
+        "max_model_length": None
     }
 
     # --- Helper Function to Scan Local Models ---
@@ -193,10 +194,14 @@ Okay, let's create the LLM loading and management API. This will involve:
 
 
         # --- Set Loading Status ---
+        # --- Set Loading Status ---
         llm_state["status"] = LLMStatus.LOADING
         llm_state["model_name_or_path"] = model_id
         llm_state["load_error"] = None
-        llm_state["load_config"] = {"device": device, "quantization": quantization} # Store load config
+        llm_state["load_config"] = {"device": device, "quantization": quantization}
+        llm_state["tokenizer"] = None # Reset tokenizer
+        llm_state["pipeline"] = None # Reset pipeline
+        llm_state["max_model_length"] = None # Reset max length
 
         try:
             load_start_time = time.time()
@@ -221,27 +226,43 @@ Okay, let's create the LLM loading and management API. This will involve:
                      quantization = None
                      llm_state["load_config"]["quantization"] = None
     
-            # --- MODIFIED PIPELINE CALL (REMOVED cache_dir) ---
+             # --- Load Tokenizer explicitly first ---
+            logger.info(f"Loading tokenizer for '{model_id}'...")
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_id,
+                trust_remote_code=True,
+                cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve())
+            )
+            logger.info("Tokenizer loaded.")
+    
+            # --- Load Model/Pipeline ---
             logger.info(f"Initializing pipeline with: model='{model_id}', device_map='{pipeline_device_map}', quantization_config={'Set' if quantization_config else 'None'}")
+            # Pass the loaded tokenizer to the pipeline
             new_pipeline = pipeline(
                 task="text-generation",
                 model=model_id,
+                tokenizer=tokenizer, # <-- Pass loaded tokenizer
                 device_map=pipeline_device_map,
                 torch_dtype=torch.float16 if device == "cuda" else torch.float32,
                 quantization_config=quantization_config,
                 trust_remote_code=True,
-                # cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve()) # <<< REMOVED THIS ARGUMENT COMPLETELY
             )
-            # Model files will now be cached based on default Transformers behavior
-            # (e.g., ~/.cache/huggingface/hub or HF_HOME/TRANSFORMERS_CACHE env vars)
-            # --- END MODIFIED PIPELINE CALL ---
     
             load_time = time.time() - load_start_time
             logger.info(f"Successfully loaded model '{model_id}' in {load_time:.2f} seconds.")
-            # Store pipeline and update state
+    
+            # --- Get and store max length ---
+            max_len = getattr(new_pipeline.model.config, "max_position_embeddings", None) \
+                      or getattr(new_pipeline.tokenizer, "model_max_length", None) \
+                      or 1024 # Fallback if not found (common for gpt2)
+            logger.info(f"Determined model max length: {max_len}")
+
             llm_state["pipeline"] = new_pipeline
+            llm_state["tokenizer"] = tokenizer # Store tokenizer
             llm_state["status"] = LLMStatus.LOADED
             llm_state["load_error"] = None
+            llm_state["max_model_length"] = max_len # Store max length
+        
             llm_state["config"] = { # Reset generation config
                 "max_new_tokens": settings.DEFAULT_LLM_MAX_NEW_TOKENS,
                 "temperature": settings.DEFAULT_LLM_TEMPERATURE,
@@ -256,6 +277,8 @@ Okay, let's create the LLM loading and management API. This will involve:
             llm_state["load_error"] = error_message
             llm_state["pipeline"] = None
             llm_state["model_name_or_path"] = None
+            llm_state["tokenizer"] = None
+            llm_state["max_model_length"] = None
         finally:
             task_duration = time.time() - task_start_time
             logger.info(f"Model loading task for '{model_id}' finished in {task_duration:.2f} seconds. Status: {llm_state['status'].value}")
