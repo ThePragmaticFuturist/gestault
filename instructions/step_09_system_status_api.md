@@ -1,6 +1,17 @@
 # Step 9: System Status API #
 
 Okay, let's implement the System Status API. We'll use the `psutil` library, which is excellent for gathering cross-platform system information, and optionally `pynvml` for detailed NVIDIA GPU stats if available.
+
+**Each part of the system should has one responsibility.**  
+
+- `models/system.py` → only defines the *shape* of the data (validation, docs, types).
+- `services/system_service.py` → only handles *logic* and data *collection* (gathers CPU, memory, etc.).
+- `endpoints/system.py` → only handles *routing* and connecting user requests to services.
+- `main.py` → bootstraps the entire server and handles lifecycle events like startup and shutdown.
+
+   
+![System Status Process](system.png)
+
    
 [Reasoning behind the code](reasoning/r9.md)
    
@@ -422,5 +433,64 @@ We have added a comprehensive System Status API:
 *   Provides a single endpoint (`/api/v1/system/status`) to retrieve all metrics.
 *   Handles potential library issues (e.g., `pynvml` not installed) gracefully.
 *   Ensures NVML resources are cleaned up on server shutdown.
+
+---
+
+# 
+
+## 1. **Graceful Degradation**
+
+Notice how the design accounts for:
+- If `pynvml` isn’t installed: it skips GPU data
+- If temperatures can't be read: it logs a warning and skips it
+- If a disk is missing: it just returns data for `/`
+
+This follows the principle of **fault tolerance** and **resilience** — the system gives partial results rather than failing entirely.
+
+---
+
+## 2. **Asynchronous FastAPI + Sync Services (Optimized Tradeoff)**
+
+Although FastAPI is async-based, the system resource gathering functions are sync — and that’s okay here because:
+- These calls are **fast**, and don’t block for long
+- Avoids the complexity of making `psutil` and `pynvml` async-compatible
+- Still lets you scale the server later
+
+If you need high-performance polling or telemetry, you can always move these into a **background worker** or cache layer.
+
+---
+
+## 3. **Startup/Shutdown Hooks = Lifecycle Management**
+
+Why use `@app.on_event("shutdown")` to clean up NVML?
+
+Because you want to:
+- Avoid memory leaks
+- Avoid dangling resources or system errors
+- Handle **graceful exits** in cloud environments (e.g., Docker, Kubernetes)
+
+This shows good system hygiene and prepares your app for **containerization** or **production orchestration**.
+
+---
+
+## 4. **Schema-Validated Responses = Safe, Documented, and Fast**
+
+Using `Pydantic` models like `SystemStatusResponse` means:
+- You *guarantee* your API always returns expected shapes/types
+- The FastAPI docs (`/docs`) are auto-generated
+- Frontend/consumers can rely on a stable, known format
+
+This reduces bugs and improves **developer experience** (DX) — great for teams or open APIs.
+
+---
+
+## 5. **Single Responsibility Principle + Readability**
+
+Each function:
+- Does one thing (`get_cpu_status`, `get_gpu_status`, etc.)
+- Has a clear name
+- Uses clear helper functions (e.g., `bytes_to_gb`)
+
+It follows best practices from the **SOLID** principles (especially the "S") and helps onboard new devs quickly.
 
 This completes the final major feature planned for our RAG LLM server! We now have capabilities for document management, RAG search, LLM interaction, chat session management, and system monitoring.
