@@ -33,6 +33,110 @@
     *   Move the existing `main.py` into the `app/` directory.
     *   Create empty `__init__.py` files in `app/`, `core/`, and `db/` to make them Python packages.
 
+---
+
+For testing purposes, we are implmenting Swagger UI.
+
+## What is Swagger UI?
+
+**Swagger UI** is a **web-based interface** that lets you:
+- Visualize your API endpoints
+- Read what each endpoint does
+- **Send requests** and see responses **without writing code**
+
+It’s like Postman, but built into your app. If you're building an API and want a "try it out" button for every route, Swagger UI gives you that—automatically.
+
+---
+
+## Why It’s Awesome for Development
+
+1. **Live testing** without Postman or writing curl commands.
+2. **Auto-generated docs** from your FastAPI route definitions.
+3. **Data validation** shown clearly (you’ll see the expected request and response models).
+4. Makes it easy to **debug** and see if your API is working as expected.
+
+---
+
+## Where does it come from in FastAPI?
+
+FastAPI **automatically generates** Swagger UI when it sees your route definitions and Pydantic models.
+
+By default, once your server is running, go to:
+```
+http://localhost:8000/docs
+```
+
+That URL is the Swagger UI!
+
+---
+
+## How Swagger UI Works in Your Application
+
+Let’s say you’re building a chat app backend. Here’s what Swagger UI does for **you**:
+
+### Location:
+In `main.py`, when you define routes like this:
+
+```python
+app.include_router(
+    sessions.router,
+    prefix="/api/v1/sessions",
+    tags=["Chat Sessions"]
+)
+```
+
+FastAPI:
+- Reads the endpoints from `sessions.py`
+- Reads the `summary`, `response_model`, and `status_code` from each route
+- Uses Pydantic models (`SessionCreateRequest`, `ChatMessageResponse`, etc.)
+- Auto-generates docs for each route
+
+### Example in Action
+
+If you go to `http://localhost:8000/docs`, you’ll see a section called **Chat Sessions**. That’s because of the `tags=["Chat Sessions"]`.
+
+Inside it, you’ll see:
+- `POST /api/v1/sessions/` → Creates a new session  
+- `GET /api/v1/sessions/` → Lists all sessions  
+- `POST /api/v1/sessions/{session_id}/messages` → Adds a message  
+- `GET /api/v1/sessions/{session_id}/messages` → Lists messages  
+- `DELETE /api/v1/sessions/{session_id}` → Deletes a session
+
+### Try It Out
+
+For each endpoint, there’s a big blue button: **“Try it out”**.
+
+Example:
+- Click **Try it out** next to `POST /api/v1/sessions/`
+- Enter some test data:
+```json
+{
+  "name": "First Test Session",
+  "rag_document_ids": ["doc-123"]
+}
+```
+- Click **Execute**
+- You’ll get a live response from your running API (like a `201 Created` with session metadata).
+
+---
+
+## Bonus: Swagger + Security
+
+Later, when you add authentication (like API keys or tokens), Swagger UI can also prompt users to enter those. You can protect certain routes and still test them live.
+
+---
+
+## Summary
+
+| Feature | What Swagger UI Does |
+|--------|----------------------|
+| Docs | Shows every route, method (GET, POST, etc.), and expected input/output |
+| Interactivity | Lets you test API endpoints right in the browser |
+| Debugging | Helps spot errors in requests or responses |
+| Auto-generated | Powered by FastAPI using your route + Pydantic model definitions |
+
+---
+
 3.  **Define Settings (`core/config.py`):**
 
     ```python
