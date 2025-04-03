@@ -1,6 +1,14 @@
 # Step 5: Implement Search Endpoints #
 
-Okay, let's implement the keyword and semantic search endpoints. We'll add these to the existing document router for now.
+There are two types of search:
+
+    **Keyword Search** – basic, fast, just checks if your search words are found in any chunk of text.
+
+    **Semantic Search** – smarter, uses AI to understand what you're looking for, even if the exact words don’t match.
+
+You're using FastAPI, Pydantic, SQLAlchemy, and ChromaDB (a vector database for semantic search). 
+
+Let's implement the keyword and semantic search endpoints. We'll add these to the existing document router for now.
    
 [Reasoning behind the code](reasoning/r5.md)
    
@@ -257,6 +265,24 @@ We have now added core search capabilities:
 *   Semantic search implemented by embedding the query and using ChromaDB's vector search.
 *   Support for filtering search results by specific document IDs in both search types.
 *   Structured request and response models for search operations.
+
+---
+
+![Search Flow](saerch_flow.png)
+
+---
+
+| **Concept**            | **What It Does**                                              |
+|------------------------|---------------------------------------------------------------|
+| `SearchQuery`          | Defines what the user sends when searching                    |
+| `ChunkResult`          | Represents one chunk of matched text                          |
+| `SearchResponse`       | Wraps up all the results and sends them back                  |
+| Keyword Search         | Uses SQL to find exact matches of your text                   |
+| Semantic Search        | Uses embeddings + ChromaDB to find similar meanings           |
+| ChromaDB               | A database that works with vectors, not just text             |
+| Embeddings             | Turn words into numbers so computers can understand meaning   |
+
+---
 
 **Important Considerations:**
 
