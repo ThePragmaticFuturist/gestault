@@ -222,7 +222,6 @@
     import sqlalchemy
     import databases
     import chromadb
-    from chromadb.config import Settings as ChromaSettings
 
     from core.config import settings # Import our settings instance
     from .models import metadata # Import the MetaData object containing our table definitions
@@ -252,14 +251,27 @@
             raise # Re-raise the exception to signal failure
 
     # --- ChromaDB Setup ---
-    # Configure ChromaDB client
-    chroma_client = chromadb.Client(
-        ChromaSettings(
-            chroma_db_impl="duckdb+parquet", # Specifies the storage backend
-            persist_directory=settings.CHROMA_PERSIST_PATH,
-            anonymized_telemetry=False # Disable telemetry
+    # Configure and initialize ChromaDB persistent client
+    try:
+        # Create a Settings object specifically for ChromaDB initialization if needed,
+        # often path is sufficient for PersistentClient.
+        chroma_settings = chromadb.Settings(
+            anonymized_telemetry=False,
+            is_persistent=True,
+             persist_directory=settings.CHROMA_PERSIST_PATH # Optional here if passed to client
+            # Note: chroma_db_impl is often inferred based on PersistentClient
         )
-    )
+    
+        chroma_client = chromadb.PersistentClient(
+            path=settings.CHROMA_PERSIST_PATH,
+            settings=chroma_settings
+        )
+        print(f"ChromaDB persistent client initialized. Path: {settings.CHROMA_PERSIST_PATH}")
+    
+    except Exception as e:
+        print(f"FATAL: Error initializing ChromaDB client: {e}")
+        # Depending on the app's needs, you might want to exit or handle this gracefully
+        raise # Re-raise to stop the server startup if ChromaDB is essential
 
     # --- Database Connection Management for FastAPI ---
     async def connect_db():
