@@ -830,7 +830,7 @@ ASSISTANT RESPONSE:"""
     llm_status_data = get_llm_status()
     tokenizer = llm_state.get("tokenizer") # Get tokenizer object from state
     max_length = llm_state.get("max_model_length")
-    model_name = llm_status_data.get("model_name_or_path", "N/A")
+    model_name = llm_status_data.get("active_model", "N/A")
 
     if llm_status_data["status"] != LLMStatus.READY.value: # Check for READY status
         error_detail = f"LLM not ready (Status: {llm_status_data['status']}). Please load/configure a model first."
@@ -944,9 +944,7 @@ ASSISTANT RESPONSE:"""
         try:
             logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}' via backend '{llm_status_data['backend_type']}'...") 
             loop = asyncio.get_running_loop()
-            llm_response = await loop.run_in_executor(
-                None, generate_text, prompt_for_llm
-            )
+            llm_response = await generate_text(prompt_for_llm)
             if llm_response is None:
                 raise Exception("LLM generation failed or returned None.")
             assistant_response_content = llm_response
