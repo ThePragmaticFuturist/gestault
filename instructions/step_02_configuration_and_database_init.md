@@ -691,7 +691,7 @@ When user sends a prompt:
 
 ---
 
-# Why design it this way? #  
+# High-Level Design Philosophy  
 
 The architecture you’re building is based on several **best practices and architectural theories** that aim to create **scalable, maintainable, modular, and async-friendly** systems. Let's break this down into the core theoretical principles and design motivations behind each major decision:
 
