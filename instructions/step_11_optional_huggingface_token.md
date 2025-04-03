@@ -1,6 +1,6 @@
 # Solution: Add Startup Login Check #
 
-Ensure the Hugging Face login (which stores a token locally) is done *before* the server potentially tries to load gated models. The best place is at the very beginning of the FastAPI startup event. This check makes sure your server has permission to use certain models from Hugging Face. It looks for a token in either `.env` or from your previous CLI login. If it can’t find one, it tells you how to fix it and stops the server from running broken.
+The purpose of this code is to make sure that when the server **starts up**, it **already has access** to your Hugging Face account **token**, which is required to use certain "gated" models — like Meta’s LLaMA models — that require you to accept license terms.The best place is at the very beginning of the FastAPI startup event. It looks for a token in either `.env` or from your previous CLI login. If it can’t find one, it tells you how to fix it and stops the server from running broken.
    
 [Reasoning behind the code](reasoning/r11.md)
    
