@@ -894,3 +894,5 @@ ASSISTANT RESPONSE:"""
 **Summary:**
 
 We have now connected the chat endpoint to the LLM service. User messages trigger RAG search, prompt construction, and a call to the loaded LLM (running asynchronously in an executor thread) to generate a response. The conversation, including the real LLM output or any errors encountered, is stored.
+
+
