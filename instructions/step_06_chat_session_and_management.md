@@ -448,6 +448,8 @@ We have now established the basic framework for managing chat sessions:
 *   Correct handling of timestamps (`created_at`, `last_updated_at`) and relationships between sessions and messages.
 *   Use of transactions for data integrity (deleting sessions, adding messages).
 
+**Components:**  
+
 - **Pydantic Models** = Define the shape of the data.
 - **FastAPI Router** = Organizes endpoint logic.
 - **SQLite via SQLAlchemy** = Stores session and message data.
