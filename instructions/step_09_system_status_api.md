@@ -436,7 +436,7 @@ We have added a comprehensive System Status API:
 
 ---
 
-# 
+# High-Level Design Philosophy
 
 ## 1. **Graceful Degradation**
 
