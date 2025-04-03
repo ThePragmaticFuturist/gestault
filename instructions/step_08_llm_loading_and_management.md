@@ -692,7 +692,13 @@ from core.config import settings
 from services.embedding_service import generate_embeddings
 # --- MODIFIED IMPORTS ---
 # Import LLM service functions and status
-from services.llm_service import generate_text, get_llm_status, LLMStatus
+from services.llm_service import (
+    generate_text,
+    get_llm_status,
+    LLMStatus,
+    summarize_text_with_query,
+    llm_state
+)
 # --- END MODIFIED IMPORTS ---
 from app.api.endpoints.documents import SearchQuery
 import sqlalchemy
@@ -832,8 +838,9 @@ ASSISTANT RESPONSE:"""
         # Cannot proceed with prompt construction, maybe store error message?
         # For now, we'll let the later check handle the generation block.
         prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
-
+        llm_ready = False
     else:
+        llm_ready = True
         # --- Define Prompt Components ---
         # Estimate tokens needed for instruction, markers, query, and response buffer
         # This is an approximation; actual token count depends on specific words.
@@ -916,6 +923,27 @@ ASSISTANT RESPONSE:"""
 
 
     logger.debug(f"[Session:{session_id}] Constructed prompt for LLM (Token Count: {final_token_count if 'final_token_count' in locals() else 'N/A'}):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}")
+
+    if llm_ready:
+        try:
+            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}'...") # Use model_name defined earlier
+            loop = asyncio.get_running_loop()
+            llm_response = await loop.run_in_executor(
+                None, generate_text, prompt_for_llm
+            )
+            if llm_response is None:
+                raise Exception("LLM generation failed or returned None.")
+            assistant_response_content = llm_response
+            logger.info(f"[Session:{session_id}] Received response from LLM.")
+            logger.debug(f"[Session:{session_id}] LLM Response:\n{assistant_response_content[:500]}...")
+
+        except Exception as e:
+            error_detail = f"LLM generation failed: {type(e).__name__}"
+            logger.error(f"[Session:{session_id}] {error_detail}: {e}", exc_info=True)
+            # Ensure response content is set on error if it wasn't already
+            if assistant_response_content is None:
+                 assistant_response_content = f"[ERROR: {error_detail}]"
+            assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}"
 
     # --- Store Assistant Message (Using actual or error response) ---
     try:
