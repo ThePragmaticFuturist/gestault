@@ -832,15 +832,31 @@ ASSISTANT RESPONSE:"""
     max_length = llm_state.get("max_model_length")
     model_name = llm_status_data.get("model_name_or_path", "N/A")
 
-    if llm_status_data["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
-        # Handle case where LLM/tokenizer isn't ready (though should be checked before generation too)
-        logger.error(f"LLM/Tokenizer not ready for prompt construction. Status: {llm_status_data['status']}")
-        # Cannot proceed with prompt construction, maybe store error message?
-        # For now, we'll let the later check handle the generation block.
+    if llm_status_data["status"] != LLMStatus.READY.value: # Check for READY status
+        error_detail = f"LLM not ready (Status: {llm_status_data['status']}). Please load/configure a model first."
+        logger.warning(f"[Session:{session_id}] {error_detail}")
+        assistant_response_content = f"[ERROR: {error_detail}]"
+        # Need to initialize metadata here if erroring out early
+        assistant_message_metadata = {
+            "prompt_preview": "[ERROR: LLM not ready]",
+            "rag_chunks_retrieved": rag_chunk_ids, # Keep RAG info if available
+            "llm_call_error": error_detail
+        }
+        llm_ready = False # Flag to skip generation
+        # No prompt needed if we can't generate
         prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
-        llm_ready = False
+    # --- Handle potential missing tokenizer/max_length needed for truncation ---
+    # These are primarily needed if we need to truncate context/history for the prompt
+    # API backends might handle truncation server-side, but good practice to check here
+    elif not tokenizer or not max_length:
+         # Only critical if context/history is long and needs truncation
+         # For now, let's allow proceeding but log a warning if they are missing
+         # (relevant if switching from local to API backend without restarting server maybe?)
+         logger.warning("Tokenizer or max_length not found in llm_state, prompt truncation might be inaccurate if needed.")
+         llm_ready = True # Allow attempt, API backend might handle length
+         # Prompt construction continues below...
     else:
-        llm_ready = True
+        llm_ready = True # Flag to indicate LLM is ready for prompt construction
         # --- Define Prompt Components ---
         # Estimate tokens needed for instruction, markers, query, and response buffer
         # This is an approximation; actual token count depends on specific words.
@@ -926,7 +942,7 @@ ASSISTANT RESPONSE:"""
 
     if llm_ready:
         try:
-            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}'...") # Use model_name defined earlier
+            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}' via backend '{llm_status_data['backend_type']}'...") 
             loop = asyncio.get_running_loop()
             llm_response = await loop.run_in_executor(
                 None, generate_text, prompt_for_llm
@@ -944,6 +960,18 @@ ASSISTANT RESPONSE:"""
             if assistant_response_content is None:
                  assistant_response_content = f"[ERROR: {error_detail}]"
             assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}"
+
+    # Ensure metadata is defined even if llm was not ready
+    if not llm_ready:
+        # We already set assistant_response_content and metadata earlier
+        pass
+    elif 'assistant_message_metadata' not in locals():
+         # Initialize metadata if generation path didn't run due to other issues
+          assistant_message_metadata = {
+             "prompt_preview": prompt_for_llm[:200] + "...",
+             "rag_chunks_retrieved": rag_chunk_ids,
+             "llm_call_error": "Unknown error before storing message"
+         }
 
     # --- Store Assistant Message (Using actual or error response) ---
     try:
