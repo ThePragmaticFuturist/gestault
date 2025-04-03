@@ -126,11 +126,42 @@ Let's add vector embedding to the pipeline. We'll use the popular `sentence-tran
                 convert_to_numpy=False # Keep as tensors for potential GPU efficiency, convert later if needed
             ) # final result is a list of lists for JSON/DB compatibility
             gen_time = time.time() - start_time
-            logger.info(f"Generated {len(embeddings)} embeddings in {gen_time:.2f} seconds.")
-            return embeddings
+    
+            # Explicit Conversion to List[List[float]]
+            final_embeddings: List[List[float]] = []
+            if isinstance(embeddings_output, list):
+                if len(embeddings_output) > 0:
+                    if isinstance(embeddings_output[0], torch.Tensor):
+                        # Input was List[Tensor], convert each tensor
+                        logger.debug("Converting List[Tensor] output to List[List[float]].")
+                        final_embeddings = [tensor.tolist() for tensor in embeddings_output]
+                    elif isinstance(embeddings_output[0], list):
+                        # Already List[List[float]] (or similar)
+                        logger.debug("Output is already List[List[...]], using as is.")
+                        final_embeddings = embeddings_output
+                    else:
+                        logger.error(f"Unexpected item type in embedding list: {type(embeddings_output[0])}")
+                        return None
+                # If empty list, final_embeddings remains []
+            elif isinstance(embeddings_output, torch.Tensor):
+                 # Handle case where encode might return a single tensor for batch=1 or single input?
+                 logger.debug("Converting single Tensor output to List[List[float]].")
+                 # Need to wrap in another list to match ChromaDB expectation for multiple embeddings
+                 single_list = embeddings_output.tolist()
+                 # Check if it's already nested [[...]] or just [...]
+                 if isinstance(single_list[0], list):
+                     final_embeddings = single_list
+                 else:
+                     final_embeddings = [single_list] # Wrap the single list
+            else:
+                 logger.error(f"Unexpected output type from model.encode: {type(embeddings_output)}")
+                 return None
+            
+            logger.info(f"Generated and converted {len(embeddings_list)} embeddings in {gen_time:.2f} seconds.")
+            return embeddings_list
+    
         except Exception as e:
-            logger.error(f"Error generating embeddings: {e}")
-            # Return None or an empty list to indicate failure? Let's return None.
+            logger.error(f"Error generating embeddings: {e}", exc_info=True)
             return None
 
     # --- Optional: Pre-load model during startup ---
