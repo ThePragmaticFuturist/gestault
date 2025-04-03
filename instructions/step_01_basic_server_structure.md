@@ -118,10 +118,14 @@ Before we can handle documents, models, or chats, we need the fundamental web se
 
 ## **Core Theory: Why Design the Server This Way?**
 
-Let’s break down **why** this server is being designed this way—from both a **software architecture** and **pragmatic AI deployment** perspective. This architecture is shaped by **best practices** in modern backend development, **AI systems engineering**, and **developer ergonomics**.
-
----
-
+Let’s break down **why** this server is being designed this way—from both a **software architecture** and **pragmatic AI deployment** perspective. This architecture is shaped by **best practices** in modern backend development, **AI systems engineering**, and **developer ergonomics**.   
+   
+   
+   
+![Server Architecture fig. 1](server_arch.png)
+   
+   
+   
 ### 1. **Separation of Concerns (SoC)**
 
 > ❝ Each part of your system should have *one job*. ❞
@@ -239,10 +243,6 @@ This is critical for RAG-based applications that often evolve quickly with AI mo
 | **Scaling Readiness** | You can go from dev machine to cloud cluster easily |
 | **LLM-Oriented** | Prepped for streaming, chunked uploads, vector search |
 | **Team-Friendly** | FastAPI makes your backend self-explanatory to others |
-
----
-
-![Server Architecture fig. 1](server_arch.png)
 
 ---
 
