@@ -896,3 +896,167 @@ ASSISTANT RESPONSE:"""
 We have now connected the chat endpoint to the LLM service. User messages trigger RAG search, prompt construction, and a call to the loaded LLM (running asynchronously in an executor thread) to generate a response. The conversation, including the real LLM output or any errors encountered, is stored.
 
 
+## List `local_models` directory and the *actual Hugging Face cache* where models downloaded via `transformers` (or `huggingface_hub`) are stored. ##  
+
+Here's how we can implement that:
+
+1.  **Identify the HF Cache Directory:** We already have `settings.HUGGINGFACE_HUB_CACHE` defined in our `core/config.py`. This is the directory we need to scan.
+
+2.  **Understand HF Cache Structure:** Models downloaded from the Hub are typically stored in subdirectories like:
+    *   `models--gpt2`
+    *   `models--bert-base-uncased`
+    *   `models--google--flan-t5-large` (using `--` as separator for organization/model name)
+    Inside these, there's often a `snapshots/<commit_hash>/` structure containing the actual files. We just need to identify the top-level model directories.
+
+3.  **Implement Scanning Logic in `services/llm_service.py`:**
+    We'll add a new function to specifically scan the Hub cache and parse the directory names back into model IDs.
+
+    ```python
+    # services/llm_service.py
+    import time
+    import logging
+    import asyncio
+    import gc
+    from enum import Enum
+    from pathlib import Path
+    from typing import Optional, Dict, Any, List
+
+    import torch
+    # ... (other imports: pipeline, AutoModelForCausalLM, etc.)
+
+    from core.config import settings
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # ... (LLMStatus Enum, llm_state dictionary) ...
+
+
+    # --- Helper Function to Scan Dedicated Local Models Dir ---
+    def list_local_models() -> List[str]:
+        """Scans the DEDICATED LOCAL_MODELS_DIR for potential model directories."""
+        local_models = []
+        models_dir = settings.LOCAL_MODELS_DIR
+        logger.info(f"Scanning for local models in: {models_dir}")
+        if models_dir.is_dir():
+            for item in models_dir.iterdir():
+                if item.is_dir():
+                    has_config = (item / "config.json").is_file()
+                    has_pytorch_bin = list(item.glob("*.bin"))
+                    has_safetensors = list(item.glob("*.safetensors"))
+                    if has_config and (has_pytorch_bin or has_safetensors):
+                        logger.debug(f"Found potential local model directory: {item.name}")
+                        local_models.append(str(item.resolve()))
+        logger.info(f"Found {len(local_models)} potential models in {models_dir}.")
+        return local_models
+
+    # --- NEW: Helper Function to Scan HF Hub Cache ---
+    def list_cached_hub_models() -> List[str]:
+        """Scans the Hugging Face Hub cache directory for downloaded models."""
+        hub_models = []
+        cache_dir = settings.HUGGINGFACE_HUB_CACHE
+        logger.info(f"Scanning for cached Hub models in: {cache_dir}")
+
+        if not cache_dir.is_dir():
+            logger.warning(f"Hugging Face cache directory not found: {cache_dir}")
+            return []
+
+        for item in cache_dir.iterdir():
+            # Look for directories starting with 'models--'
+            if item.is_dir() and item.name.startswith("models--"):
+                # Check if it contains snapshots (a good indicator it's a model cache)
+                snapshots_dir = item / "snapshots"
+                if snapshots_dir.is_dir() and any(snapshots_dir.iterdir()): # Check if snapshots is not empty
+                    # Parse directory name back to model ID
+                    # Example: 'models--google--flan-t5-large' -> 'google/flan-t5-large'
+                    # Example: 'models--gpt2' -> 'gpt2'
+                    model_id = item.name.removeprefix("models--").replace("--", "/")
+                    logger.debug(f"Found potential cached Hub model: {model_id} (from {item.name})")
+                    hub_models.append(model_id)
+
+        logger.info(f"Found {len(hub_models)} potential cached models in {cache_dir}.")
+        return sorted(list(set(hub_models))) # Return sorted unique list
+
+    # ... (_load_model_task, get_llm_status, update_llm_config, generate_text) ...
+    # NOTE: The _load_model_task should work fine with these Hub IDs without modification
+
+    ```
+    *   Renamed the original `list_local_models` slightly for clarity (scanning the *dedicated* directory).
+    *   Added `list_cached_hub_models` function.
+    *   It iterates through the configured `HUGGINGFACE_HUB_CACHE`.
+    *   Looks for directories starting with `models--`.
+    *   Checks for a non-empty `snapshots` subdirectory inside as confirmation.
+    *   Parses the directory name (e.g., `models--google--flan-t5-large`) back into the standard Hub ID format (`google/flan-t5-large`) using `removeprefix` and `replace`.
+    *   Returns a sorted, unique list of found model IDs.
+
+4.  **Update API Model (`app/api/models/llm.py`):**
+    Modify `AvailableModelsResponse` to include the list of cached Hub models.
+
+    ```python
+    # app/api/models/llm.py
+    from pydantic import BaseModel, Field
+    from typing import List, Optional, Dict, Any
+    # ... (other models: ModelLoadRequest, etc.)
+
+    class AvailableModelsResponse(BaseModel):
+        local_model_paths: List[str] = Field(description="Absolute paths to models found in the dedicated local_models directory.")
+        cached_hub_models: List[str] = Field(description="Model IDs found in the Hugging Face Hub cache directory.")
+    ```
+    *   Renamed `local_models` to `local_model_paths` for clarity (since they are paths).
+    *   Added `cached_hub_models`.
+
+5.  **Update API Endpoint (`app/api/endpoints/models.py`):**
+    Modify the `get_available_models` endpoint to call both scanning functions.
+
+    ```python
+    # app/api/endpoints/models.py
+    # ... (imports) ...
+    # Make sure both service functions are imported
+    from services.llm_service import (
+        list_local_models,
+        list_cached_hub_models, # <-- Import the new function
+        _load_model_task,
+        get_llm_status,
+        update_llm_config,
+        llm_state,
+        LLMStatus
+    )
+    # ... (other imports) ...
+
+    router = APIRouter()
+
+    @router.get(
+        "/available",
+        response_model=AvailableModelsResponse,
+        summary="List available local and cached Hub models", # Updated summary
+    )
+    async def get_available_models():
+        """
+        Scans the configured local models directory and the Hugging Face cache
+        directory and returns lists of found models.
+        """
+        try:
+            local_paths = list_local_models()
+            hub_ids = list_cached_hub_models()
+            return AvailableModelsResponse(
+                local_model_paths=local_paths,
+                cached_hub_models=hub_ids
+            )
+        except Exception as e:
+            logger.error(f"Error listing available models: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to list available models.")
+
+    # ... (rest of the endpoints: /load, /status, /config) ...
+    ```
+    *   Calls both `list_local_models` and `list_cached_hub_models`.
+    *   Populates the updated `AvailableModelsResponse`.
+
+6.  **Run and Test:**
+    *   Restart the server: `uvicorn app.main:app --reload ...`
+    *   Ensure you have previously loaded at least one model from the Hub (like `gpt2`) so it exists in the cache (`~/.cache/huggingface/hub` or your configured path).
+    *   Execute `GET /api/v1/models/available` via the `/docs` page or `curl`.
+    *   Check the response. It should now contain two lists:
+        *   `local_model_paths`: Listing any models found in your specific `./local_models` folder (if any).
+        *   `cached_hub_models`: Listing the IDs (like `"gpt2"`, `"all-MiniLM-L6-v2"`, etc.) found in the central HF cache.
+
+This provides a much more comprehensive view of the models readily available to the server.
