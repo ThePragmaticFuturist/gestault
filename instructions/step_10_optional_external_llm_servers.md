@@ -138,55 +138,87 @@ class LLMBackendBase(abc.ABC):
 
 
 # --- Local Transformers Backend ---
-# We'll integrate the existing logic from llm_service into this class later
 class LocalTransformersBackend(LLMBackendBase):
     def __init__(self):
-        # This backend will hold the pipeline, tokenizer, etc.
-        # These will be populated by a dedicated loading function later
-        self.pipeline = None
-        self.tokenizer = None
+        # Keep pipeline for now? Or just store model and tokenizer?
+        # Let's store model and tokenizer directly for more control.
+        # self.pipeline = None # Remove pipeline if generating directly
+        self.model: Optional[PreTrainedModel] = None # Store the model
+        self.tokenizer: Optional[PreTrainedTokenizerBase] = None # Store the tokenizer
         self.model_name_or_path: Optional[str] = None
         self.load_config: Dict[str, Any] = {}
         self.max_model_length: Optional[int] = None
         logger.info("LocalTransformersBackend initialized (inactive).")
 
-    async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
-        # This will contain the refined pipeline call logic from generate_text
-        if self.pipeline is None or self.tokenizer is None:
-            logger.error("Local pipeline/tokenizer not loaded.")
+    def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        # Generate using model and tokenizer directly
+        if self.model is None or self.tokenizer is None:
+            logger.error("Local model/tokenizer not loaded.")
             return None
 
         try:
-            logger.info("Generating text with local Transformers pipeline...")
-            generation_keys = {"max_new_tokens", "temperature", "top_p", "top_k"}
+            logger.info("Generating text with local model.generate()...")
+
+            # 1. Tokenize the input prompt
+            # Ensure padding side is set correctly if needed (often left for generation)
+            # self.tokenizer.padding_side = "left" # Uncomment if model requires left padding
+            inputs = self.tokenizer(prompt, return_tensors="pt", return_attention_mask=True)
+            # Move inputs to the same device as the model
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+            # 2. Prepare generation arguments (filter from global config)
+            generation_keys = {"max_new_tokens", "temperature", "top_p", "top_k", "repetition_penalty"}
             generation_kwargs = {k: config[k] for k in generation_keys if k in config}
+            # Add other necessary generate() arguments
             generation_kwargs["do_sample"] = True
-            generation_kwargs["num_return_sequences"] = 1
-            generation_kwargs["repetition_penalty"] = config.get("repetition_penalty", 1.15) # Example: get from config
+            # Add pad_token_id if tokenizer has it, otherwise use eos_token_id
+            generation_kwargs["pad_token_id"] = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
 
-            logger.debug(f"Passing generation kwargs to pipeline: {generation_kwargs}")
 
-            # NOTE: Pipeline call itself is blocking CPU/GPU
-            # Needs to be run in executor by the caller (llm_service.generate_text)
-            outputs = self.pipeline(prompt, **generation_kwargs)
+            logger.debug(f"Passing generation kwargs to model.generate: {generation_kwargs}")
 
-            full_generated_text = outputs[0]['generated_text']
-            logger.debug(f"LLM Raw Output:\n{full_generated_text}")
+            # 3. Call model.generate()
+            # Ensure no blocking operations outside executor if needed (generate itself is blocking)
+            with torch.no_grad(): # Disable gradient calculation for inference
+                 outputs = self.model.generate(
+                     **inputs,
+                     **generation_kwargs
+                 )
 
-            # Use the prompt structure marker defined in sessions.py
-            response_marker = "\n### RESPONSE:" # Ensure this matches sessions.py
+            # 4. Decode the output tokens, skipping prompt tokens and special tokens
+            # outputs[0] contains the full sequence (prompt + generation)
+            # input_ids_len = inputs['input_ids'].shape[1] # Length of the input prompt tokens
+            # generated_token_ids = outputs[0][input_ids_len:] # Get only generated tokens
+            # result = self.tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+
+            # --- OR: Decode the full output and clean (simpler) ---
+            full_generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            logger.debug(f"LLM Raw Decoded Output (skip_special_tokens=True):\n{full_generated_text}")
+
+            # Use the same prompt cleaning logic as before (find marker)
+            response_marker = "\n### RESPONSE:"
             prompt_marker_pos = prompt.rfind(response_marker)
+            # Clean the *original* prompt (remove marker part) before checking startswith
+            prompt_base = prompt[:prompt_marker_pos] if prompt_marker_pos != -1 else prompt
 
-            if prompt_marker_pos != -1:
-                 response_start_pos = prompt_marker_pos + len(response_marker)
-                 if full_generated_text.startswith(prompt[:response_start_pos]):
-                      result = full_generated_text[response_start_pos:].strip()
-                 else:
-                      logger.warning("Generated text didn't start with the expected prompt prefix. Using full generated text.")
-                      result = full_generated_text.strip()
+            if full_generated_text.startswith(prompt_base):
+                 # Try extracting after the *original* full prompt if marker logic fails
+                 result = full_generated_text[len(prompt):].strip()
+                 if not result and prompt_marker_pos != -1: # If removing full prompt failed, try marker again
+                     response_start_pos = prompt_marker_pos + len(response_marker)
+                     result = full_generated_text[response_start_pos:].strip()
+                 logger.debug("Extracted response by removing prompt.")
+
+            elif prompt_marker_pos != -1 and response_marker in full_generated_text:
+                 # Maybe prompt isn't exactly at start, find marker in output
+                  response_start_pos = full_generated_text.rfind(response_marker) + len(response_marker)
+                  result = full_generated_text[response_start_pos:].strip()
+                  logger.debug("Extracted response by finding marker in output.")
             else:
-                 logger.warning("Response marker not found in original prompt. Using full generated text.")
+                 # Fallback: Assume output is only the response (less likely with generate)
+                 logger.warning("Cannot determine prompt end in generated text. Using full decoded text.")
                  result = full_generated_text.strip()
+
 
             if not result:
                  logger.warning("Extraction resulted in an empty string.")
@@ -203,28 +235,26 @@ class LocalTransformersBackend(LLMBackendBase):
              "active_model": self.model_name_or_path,
              "load_config": self.load_config,
              "max_model_length": self.max_model_length,
-             # Add any other relevant local status info
+             "model_device": str(self.model.device) if self.model else None, # Add device info
          }
 
     async def unload(self):
         """Unloads the local model and clears memory."""
         logger.info(f"Unloading local model '{self.model_name_or_path}'...")
         # Keep references to delete them explicitly
-        pipeline_to_del = self.pipeline
-        model_to_del = getattr(pipeline_to_del, 'model', None) if pipeline_to_del else None
-        tokenizer_to_del = self.tokenizer # Use self.tokenizer
+        model_to_del = self.model
+        tokenizer_to_del = self.tokenizer
 
-        self.pipeline = None
+        self.model = None # Clear model ref
         self.tokenizer = None
         self.model_name_or_path = None
         self.load_config = {}
         self.max_model_length = None
 
-        del pipeline_to_del
         del model_to_del
         del tokenizer_to_del
 
-        import gc, torch # Import locally for unload
+        import gc
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -431,7 +461,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 
 # Transformers needed only if local backend is used
-from transformers import pipeline, AutoTokenizer, BitsAndBytesConfig
+from transformers import pipeline, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel, PreTrainedTokenizerBase
 
 from core.config import settings
 # Import the backend classes
@@ -498,42 +528,46 @@ async def _unload_current_backend():
 # --- Local Model Loading Task (Modified) ---
 # This now specifically targets the LocalTransformersBackend instance
 async def _load_local_model_task(
-    backend: LocalTransformersBackend, # Pass the backend instance
+    backend: LocalTransformersBackend,
     model_id: str,
     device: str,
     quantization: Optional[str]
 ):
-    """Loads a model into the LocalTransformersBackend instance."""
+    """Loads a model and tokenizer into the LocalTransformersBackend instance."""
     task_start_time = time.time()
     logger.info(f"[Local Loader] Starting task for '{model_id}' on device '{device}' q: '{quantization}'...")
 
-    # No need to unload here, unload is handled before calling this task if needed
-
-    llm_state["status"] = LLMStatus.LOADING # Update global status
+    llm_state["status"] = LLMStatus.LOADING
     llm_state["last_error"] = None
-    backend.model_name_or_path = model_id # Tentative assignment
+    backend.model_name_or_path = model_id
 
     try:
         load_start_time = time.time()
         quantization_config = None
-        pipeline_device_map = device if device != "cpu" else None
+        # Determine device map strategy for AutoModel
+        # Use 'auto' for multi-gpu or quantization, explicit device for single GPU full precision
+        device_map = "auto" if quantization or torch.cuda.device_count() > 1 else device
+        if device == "cpu":
+             device_map = None # Don't use device_map for CPU
+
+        logger.info(f"[Local Loader] Effective device_map strategy: '{device_map}'")
+
         if quantization:
-             # ... (Quantization config logic - same as before) ...
+            # ... (Quantization config logic - same as before) ...
               if quantization == "8bit" and torch.cuda.is_available():
                  quantization_config = BitsAndBytesConfig(load_in_8bit=True)
                  logger.info("[Local Loader] Applying 8-bit quantization.")
-                 pipeline_device_map = "auto"
               elif quantization == "4bit" and torch.cuda.is_available():
                   quantization_config = BitsAndBytesConfig(
                      load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
                      bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
                  )
                   logger.info("[Local Loader] Applying 4-bit quantization (nf4).")
-                  pipeline_device_map = "auto"
-              else: # Fallback
+              else:
                  logger.warning(f"[Local Loader] Quantization '{quantization}' not supported/applicable. Loading full precision.")
                  quantization = None
 
+        # --- Load Tokenizer ---
         logger.info(f"[Local Loader] Loading tokenizer for '{model_id}'...")
         tokenizer = AutoTokenizer.from_pretrained(
             model_id, trust_remote_code=True,
@@ -541,44 +575,47 @@ async def _load_local_model_task(
         )
         logger.info("[Local Loader] Tokenizer loaded.")
 
-        logger.info(f"[Local Loader] Initializing pipeline: model='{model_id}', device_map='{pipeline_device_map}', q_config={'Set' if quantization_config else 'None'}")
-        pipeline_instance = pipeline(
-            task="text-generation", model=model_id, tokenizer=tokenizer,
-            device_map=pipeline_device_map,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            quantization_config=quantization_config, trust_remote_code=True,
+        # --- Load Model ---
+        logger.info(f"[Local Loader] Loading model '{model_id}'...")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            device_map=device_map, # Use determined device_map
+            quantization_config=quantization_config,
+            torch_dtype=torch.float16 if device == "cuda" and not quantization else None, # Use float16 on GPU if not quantizing to bitsandbytes native types
+            trust_remote_code=True,
+            cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve())
         )
+        logger.info("[Local Loader] Model loaded successfully.")
+
         load_time = time.time() - load_start_time
         logger.info(f"[Local Loader] Successfully loaded model '{model_id}' in {load_time:.2f}s.")
 
-        max_len = getattr(pipeline_instance.model.config, "max_position_embeddings", None) \
+        max_len = getattr(model.config, "max_position_embeddings", None) \
                   or getattr(tokenizer, "model_max_length", None) \
-                  or 1024
+                  or 1024 # Default fallback
         logger.info(f"[Local Loader] Determined model max length: {max_len}")
 
         # --- Update the specific backend instance ---
-        backend.pipeline = pipeline_instance
+        backend.model = model # Store model
         backend.tokenizer = tokenizer
-        backend.model_name_or_path = model_id # Confirm final name
+        backend.model_name_or_path = model_id
         backend.load_config = {"device": device, "quantization": quantization}
         backend.max_model_length = max_len
+
         # --- Update global state ---
         llm_state["status"] = LLMStatus.READY
         llm_state["active_model"] = model_id
         llm_state["last_error"] = None
 
     except Exception as e:
+        # ... (Error handling - clear backend.model, backend.tokenizer) ...
         error_message = f"[Local Loader] Failed to load model '{model_id}': {type(e).__name__}: {e}"
         logger.error(error_message, exc_info=True)
-        # Clear backend state
-        backend.pipeline = None
+        backend.model = None # Ensure refs are cleared on error
         backend.tokenizer = None
-        backend.model_name_or_path = None
-        # Update global state
         llm_state["status"] = LLMStatus.FAILED
         llm_state["last_error"] = error_message
-        llm_state["active_model"] = None # Clear model name on failure
-
+        llm_state["active_model"] = None
     finally:
         task_duration = time.time() - task_start_time
         logger.info(f"[Local Loader] Task for '{model_id}' finished in {task_duration:.2f}s. Status: {llm_state['status'].value}")
