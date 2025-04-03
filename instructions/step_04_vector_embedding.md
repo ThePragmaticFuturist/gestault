@@ -124,7 +124,7 @@ Let's add vector embedding to the pipeline. We'll use the popular `sentence-tran
                 batch_size=settings.EMBEDDING_BATCH_SIZE,
                 show_progress_bar=False,
                 convert_to_numpy=False # Keep as tensors for potential GPU efficiency, convert later if needed
-            ).tolist() # Convert final result to list of lists for JSON/DB compatibility
+            ) # final result is a list of lists for JSON/DB compatibility
             gen_time = time.time() - start_time
             logger.info(f"Generated {len(embeddings)} embeddings in {gen_time:.2f} seconds.")
             return embeddings
