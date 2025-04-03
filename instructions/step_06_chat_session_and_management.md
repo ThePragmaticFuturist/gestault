@@ -459,6 +459,133 @@ We have now established the basic framework for managing chat sessions:
 - **Transactions** = Ensure database changes are safe and atomic.
 - **API Docs (`/docs`)** = Test your API interactively.
   
+## High-Level Design Philosophy
+
+We're building this backend using principles from:
+
+1. **Separation of Concerns (SoC)**  
+2. **Scalability & Extensibility**  
+3. **Security and Data Integrity**  
+4. **Developer Experience (DX)**  
+5. **Reusability & Modularity**  
+6. **Declarative Contracts with Pydantic & OpenAPI**
+
+Let’s break these down.
+
+---
+
+## 1. **Separation of Concerns (SoC)**
+
+**What it means:**  
+Each part of your code should be responsible for **one thing**, and do it well.
+
+**How we apply it:**
+- **Models (`models/chat.py`)** define **what** data looks like.
+- **Endpoints (`endpoints/sessions.py`)** define **how** users interact.
+- **Database (`db/`)** defines **how** data is stored.
+- **main.py** is just responsible for **starting the server** and connecting all parts.
+
+This keeps things clean and easy to debug. Want to change how data is stored? Do it in the `db/` layer without touching the API routes.
+
+---
+
+## 2. **Scalability & Extensibility**
+
+**What it means:**  
+Designing in a way that lets you grow features over time without rewriting core logic.
+
+**How we apply it:**
+- Adding new endpoints (e.g., `/models`, `/chat-summary`) just means creating new files or routers.
+- `SessionCreateRequest` can later be extended to include more fields like `temperature`, `chat_mode`, etc.
+- The RAG integration is designed to **plug in** at the message endpoint level.
+
+This lets you ship a minimum viable product (MVP), then layer in more advanced features (like semantic search or LLM feedback loops) without tearing everything down.
+
+---
+
+## 3. **Security and Data Integrity**
+
+**What it means:**  
+You protect your app from crashes, bugs, and abuse.
+
+**How we apply it:**
+- We use **UUIDs** for session IDs (harder to guess and better for distributed systems).
+- **`orm_mode = True`** ensures we don’t leak unintended fields in responses.
+- **Pydantic validation** protects against malformed input.
+- **Transactions** (inserting messages, deleting sessions) ensure consistency even if something fails mid-way.
+
+This design protects both user data and your system's reputation.
+
+---
+
+## 4. **Developer Experience (DX)**
+
+**What it means:**  
+Make it easy for yourself (or your team) to understand, build, and debug the system.
+
+**How we apply it:**
+- FastAPI automatically generates **Swagger UI**.
+- Type hints and `BaseModel` make request/response validation visible and testable.
+- Clear logging helps you debug sessions, errors, and DB operations.
+- Modular structure keeps mental overhead low.
+
+The faster you can find bugs or test features, the more time you save long term.
+
+---
+
+## 5. **Reusability & Modularity**
+
+**What it means:**  
+Build once, use many times—with little to no change.
+
+**How we apply it:**
+- The `get_session_or_404()` helper can be used across all endpoints that need to look up a session.
+- The session/message response models can be reused in UI clients, CLI tools, and even logs.
+- You could create a GraphQL version of this API later by just reusing the same Pydantic models and DB logic.
+
+This makes your system adaptable and maintainable.
+
+---
+
+## 6. **Declarative Contracts with Pydantic + OpenAPI**
+
+**What it means:**  
+Make **contracts** (rules for how data moves through your system) **explicit** and **auto-documented**.
+
+**How we apply it:**
+- `BaseModel` defines schemas in a declarative, readable way.
+- OpenAPI + Swagger automatically turns that into live docs and test clients.
+- No guesswork for frontend engineers or users of your API.
+
+You reduce misunderstandings between frontend/backend or team members.
+
+---
+
+## Specific to RAG Chat Apps
+
+This server is also built with **Retrieval-Augmented Generation (RAG)** in mind, so the design sets us up for:
+- Associating sessions with document contexts via `rag_document_ids`
+- Later querying those documents using vector search
+- Feeding that context into LLM prompts
+- Saving both the **user's input** and the **assistant's response** to the session
+
+So while the server starts as a CRUD API for sessions and messages, it’s **designed to evolve into a full-blown AI assistant** framework.
+
+---
+
+## Summary Table
+
+| Principle                     | Why It Matters                                      | Where It Shows Up                     |
+|------------------------------|-----------------------------------------------------|----------------------------------------|
+| Separation of Concerns       | Keeps code easy to change/debug                     | Routes, Models, DB split cleanly       |
+| Scalability & Extensibility  | Easy to grow features                               | RAG doc IDs, modular routers           |
+| Security & Integrity         | Prevents bad data or logic                          | UUIDs, validation, transactions        |
+| Developer Experience (DX)    | Saves time, reduces bugs                            | Swagger UI, logs, typing               |
+| Reusability & Modularity     | Don’t repeat yourself                               | Helpers, Pydantic models reused        |
+| Declarative Contracts        | Define rules once, use everywhere                   | Pydantic + FastAPI docs                |
+
+---
+
 **Next Steps:**
 
 The server can now store conversations. The next logical steps involve making the chat interactive and leveraging our RAG setup:
