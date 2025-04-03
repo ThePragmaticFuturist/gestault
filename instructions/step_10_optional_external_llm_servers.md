@@ -6,7 +6,7 @@ Okay, integrating external LLM inference servers like Ollama and vLLM alongside 
    
 [Reasoning behind the code](reasoning/r10.md)
    
-Here's a plan:
+Here's the plan:
 
 1.  **Configuration:** Add settings to choose the backend type (`local`, `ollama`, `vllm`) and specify base URLs for API backends.
 2.  **Abstraction Layer:** Define a base class or common structure for different LLM backends.
