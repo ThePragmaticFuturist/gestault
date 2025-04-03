@@ -1,5 +1,17 @@
 # Step 6: Chat Session and Message Management API #
 
+We’re building a chat session API using FastAPI, where:
+
+*    Users can start chat sessions (like a conversation thread).
+
+*    Users can add messages to those sessions.
+
+*    The system saves those messages in a SQLite database.
+
+*    We can later retrieve or delete those sessions and messages.
+
+Imagine it like how chat works in ChatGPT, but simplified.
+
 Okay, let's create the API endpoints and database logic for managing chat sessions and their message history. We'll focus on storing the data correctly in our SQLite tables (`sessions` and `chat_messages`).
    
 [Reasoning behind the code](reasoning/r6.md)
