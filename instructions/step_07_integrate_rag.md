@@ -215,6 +215,7 @@ Okay, let's modify the `add_message_to_session` endpoint to incorporate the RAG 
 
         # --- Construct Prompt (Placeholder) ---
         # This is where you'd format the final prompt for the LLM
+    
         prompt_for_llm = f"""CONTEXT:
 {rag_context if rag_context else "No RAG context available."}
 
