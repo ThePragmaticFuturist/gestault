@@ -1,7 +1,9 @@
 # Step 10: Optional External LLM Server Integration #
 
 Okay, integrating external LLM inference servers like Ollama and vLLM alongside local loading requires adding a layer of abstraction. We need to configure which backend to use and then have our service call the appropriate interaction logic.
-
+   
+[Reasoning behind the code](reasoning/r10.md)
+   
 Here's a plan:
 
 1.  **Configuration:** Add settings to choose the backend type (`local`, `ollama`, `vllm`) and specify base URLs for API backends.
