@@ -1,5 +1,7 @@
 # Step 3: Document Upload and Background Processing #
-
+   
+[Reasoning behind the code](reasoning/r3.md)
+   
 1.  **Install New Dependencies:**
     We need libraries for handling different file formats and detecting file types. We'll also use LangChain's text splitter for convenience.
     ```bash
