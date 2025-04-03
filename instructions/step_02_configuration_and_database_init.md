@@ -1,5 +1,7 @@
 # Step 2: Configuration and Database Initialization #
-
+   
+[Reasoning behind the code](reasoning/r2.md)
+   
 1.  **Install Dependencies:**
     ```bash
     pip install pydantic-settings python-dotenv sqlalchemy "databases[sqlite]" chromadb
