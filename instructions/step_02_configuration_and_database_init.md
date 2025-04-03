@@ -579,7 +579,7 @@ collection.add(documents=[...], embeddings=[...])
 
 ---
 
-### **Next User Prompt Flow**
+### **11. Next User Prompt Flow**
 When user sends a prompt:
 - Find matching documents by querying ChromaDB for similar embeddings.
 - Use them to generate a RAG-style response from your LLM.
