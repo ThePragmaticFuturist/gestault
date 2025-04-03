@@ -311,7 +311,7 @@ Okay, let's create the API endpoints and database logic for managing chat sessio
 
     # Import routers
     from app.api.endpoints import documents
-    from app.api.endpoints import sessions # <--- ADDED IMPORT
+    from app.api.endpoints import sessions
 
     from core.config import settings
     from db.database import connect_db, disconnect_db, create_metadata_tables, get_or_create_collections
