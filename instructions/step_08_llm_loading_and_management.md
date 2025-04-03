@@ -1222,3 +1222,96 @@ Here's how we can implement that:
         *   `cached_hub_models`: Listing the IDs (like `"gpt2"`, `"all-MiniLM-L6-v2"`, etc.) found in the central HF cache.
 
 This provides a much more comprehensive view of the models readily available to the server.
+
+## UNDERLYING THEORIES
+
+---
+
+### 1. **Retrieval-Augmented Generation (RAG) Theory**
+
+**Problem:** LLMs are stateless and expensive to train on your own data.  
+**Solution:** Instead of retraining or fine-tuning, **retrieve relevant data**, inject it into the prompt, then generate.
+
+This leverages:
+- **Semantic Search** (via ChromaDB + vector embeddings)
+- **LLM Prompt Engineering** to mix knowledge and context
+- A hybrid: *structured memory + generative language*
+
+🔍 **Core idea:** LLMs don’t need to “know” everything—they just need a good context window.
+
+---
+
+### 2. **Microservices + Domain-Driven Design (DDD)**
+
+Even though you're not using Docker/Kubernetes (yet), the design treats the system as **composable services**:
+
+| Concern | Module / Service |
+|--------|------------------|
+| Configs / Devices | `core/config.py` |
+| Embedding Generation | `services/embedding_service.py` |
+| LLM Management | `services/llm_service.py` |
+| Chat Sessions | `endpoints/sessions.py` |
+| Document Management | `endpoints/documents.py` |
+
+**Core idea:** Make every part swappable and testable.
+
+---
+
+### 3. **Asynchronous Design with Background Tasks**
+
+**Problem:** LLM loading and generation are blocking (slow and resource-heavy).  
+**Solution:** Use Python’s `asyncio.run_in_executor()` to run long tasks *off the main thread*.
+
+This enables:
+- Scalability: Handle more users without freezing
+- Parallelism: Load models or generate while serving other users
+- Streaming or live-response systems later
+
+---
+
+### 4. **Stateful Inference with Stateless Interfaces**
+
+You persist **chat sessions and message history** in a **SQL DB**, which gives you:
+
+- Reproducibility (LLMs are stateless but logs aren’t)
+- Context-aware LLM prompts (via `CHAT_HISTORY_LENGTH`)
+- Support for features like summaries, auditing, etc.
+
+**Core idea:** APIs are stateless, but you create the illusion of memory using a database.
+
+---
+
+### 5. **Dynamic Model Loading & Configuration**
+
+By building a **live-configurable LLM layer**, you support:
+
+- Switching between models (e.g., GPT-2, Mistral, Falcon)
+- Running on different hardware (CPU, GPU)
+- Tuning generation parameters (`temperature`, `top_k`, etc.)
+
+**Core idea:** Treat models as hot-swappable plugins—not hardcoded.
+
+---
+
+### 6. **Human-in-the-Loop and Observability**
+
+All messages, configs, prompts, and responses are stored in the DB. This:
+- Enables **post-hoc debugging**
+- Supports building dashboards or observability tooling
+- Enables **user trust** and traceability for enterprise cases
+
+You’re designing with **AI observability and explainability** in mind.
+
+---
+
+## THEORY-IN-PRACTICE SUMMARY
+
+| Principle | How it shows up |
+|----------|----------------|
+| **Separation of Concerns** | Dedicated services and endpoints |
+| **Modularity** | Pluggable models, configs, quantization |
+| **Asynchronous Patterns** | Executors for heavy loading/generation |
+| **Data Locality** | RAG keeps data in local vector DB |
+| **Stateless Interfaces + Stateful DB** | Prompts feel stateful, backed by persistent history |
+| **LLM Orchestration Layer** | Makes your app model-agnostic and future-proof |
+| **Scalability & Resilience** | Allows error capture, retries, and task isolation |
