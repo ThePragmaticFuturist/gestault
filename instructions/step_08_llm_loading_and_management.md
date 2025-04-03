@@ -1,7 +1,5 @@
 # Step 8: LLM Loading and Management #
 
----
-
 ## THE BIG IDEA: *Separation of Concerns + Modularity + Async I/O*
 
 You’re building a **modular, asynchronous, retrieval-augmented LLM system** that:
