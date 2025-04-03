@@ -115,15 +115,10 @@ Before we can handle documents, models, or chats, we need the fundamental web se
     *   Go to `http://localhost:8000/docs`. FastAPI automatically generates interactive API documentation (Swagger UI).
     *   Go to `http://localhost:8000/redoc`. FastAPI also provides alternative documentation (ReDoc).
 
-**Explanation:**
 
-Let’s break down **why** this server is being designed this way—from both a **software architecture** and **pragmatic AI deployment** perspective.
+## **Core Theory: Why Design the Server This Way?**
 
----
-
-## 🧠 **Core Theory: Why Design the Server This Way?**
-
-This architecture is shaped by **best practices** in modern backend development, **AI systems engineering**, and **developer ergonomics**.
+Let’s break down **why** this server is being designed this way—from both a **software architecture** and **pragmatic AI deployment** perspective. This architecture is shaped by **best practices** in modern backend development, **AI systems engineering**, and **developer ergonomics**.
 
 ---
 
@@ -246,6 +241,8 @@ This is critical for RAG-based applications that often evolve quickly with AI mo
 | **Team-Friendly** | FastAPI makes your backend self-explanatory to others |
 
 ---
+
+![Server Architecture fig. 1](server_arch.png)
 
 ---
 
