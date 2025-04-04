@@ -1,0 +1,18 @@
+# .gitignore
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+*.db-journal
+chroma_db_data/ # Placeholder for ChromaDB data directory
+local_models/ # Placeholder for local LLM model files
+uploaded_docs/ # Placeholder for temporarily stored uploads
+*.log
+data/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
