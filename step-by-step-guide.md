@@ -162,5 +162,9 @@ This structured approach ensures that the foundation is solid before adding more
 
 
 **[Glossary of Terms](instructions/z1_glossary.md)**
+
 **[Citations and Additional References](instructions/z2_citations_and_references.md)**
-**[Environment Setup](instructions/z3_environment_clone_setup_quickstart.md)**
+
+**[Environment Setup](instructions/z3_environment_clone_setup_quickstart.md)**  
+
+
