@@ -3,7 +3,7 @@
 > ### One Prompt Shall Rule Them All ###
 > You are an expert Python developer and Large Language Model server designer. I want to work with you to create a RAG LLM server one step at a time and learn along the way about how you are coding it. I want this server to provide an API for uploading, chunking, vector embedding, managing, and providing keyword and semantic search tools for RAG documents using sqlite and chromadb. The documents and text must be accessible by document IDs to avoid the need to send large text packets with prompts during chat sessions. For document processing use beautiful soup, python-dox, and docling. The server needs to be able to conduct threaded chat sessions and store the prompt and response exchange as RAG and vector embedding for long term search and recall during a session. Sessions must be stored with IDs, date and time information for the last prompt response, the LLM model used, the RAG document IDs if any, and a name for the session. Automatic meta-tagging of the session is applied for searching the list of stored sessions. The server must provide LLM model loading from the HuggingFace CLI and local models and provide a status for when the model is successfully or unsuccessfully loaded. It must provide a list of available local models. The server must provide a means of modifying the settings for the loaded LLM and confirmation when the settings are in place. The server must also provide system status of GPU and CPU, operating temperature if available, disk space, and amount of free RAM plus any other relevant data affecting the operational efficiency of the server. Please start the design and development with the most logical component and we will build each subsequent part of our RAG LLM server after we achieve success with the previous code.
 >
-> [Click here for the full prompt transcript with bug fixing](instructions/the_complete_prompt_response_thread.md)
+> [Click here for the full prompt transcript with bug fixing](instructions/z4_the_complete_prompt_response_thread.md)
 
 ***
 
@@ -83,17 +83,17 @@ This structured approach ensures that the foundation is solid before adding more
 
   
 
-![Web API interface for Gestault RAG LLM Server](instructions/web_interface.png)  
+![Web API interface for Gestault RAG LLM Server](instructions/images/web_interface.png)  
 
 ***
 
-**[Step A: Environment Setup](instructions/environment_setup_quickstart.md)**
+**[Step A: Environment Setup](instructions/z3_environment_setup_quickstart.md)**
 
-**[Step B: CUDA Environment Setup](instructions/cuda_environment_setup_guide.md)**
+**[Step B: CUDA Environment Setup](instructions/setup_1_cuda_environment_setup_guide.md)**
 
-**[Step C: Required Python Package Installation](instructions/python_required_packages_installation.md)**
+**[Step C: Required Python Package Installation](instructions/setup_2_python_required_packages_installation.md)**
 
-**[Step D: Glossary of Terms](instructions/glossary.md)**
+**[Step D: Glossary of Terms](instructions/z1_glossary.md)**
 
 ***
 
@@ -157,7 +157,7 @@ This structured approach ensures that the foundation is solid before adding more
 *   **What:** Integrated validation of HuggingFace Token from either HuggingFace local cache or .env file (`app/api/endpoints/system.py`). 
 *   **Why:** To simplify the process of accessing HuggingFace Hub private models that require token.
 
-**[Step 12: (Optional) Future Features and Enhancements ](instructions/xtra_credit_future_features.md)**
+**[Step 12: (Optional) Future Features and Enhancements ](instructions/step_12_xtra_credit_future_features.md)**
 
 *   **What:** Once the foundational server is built, try these additional features and enhancements. 
 *   **Why:** The server you built is just a starting point for learning all about generative AI and LLMs.
