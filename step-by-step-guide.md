@@ -160,6 +160,7 @@ This structured approach ensures that the foundation is solid before adding more
 *   **What:** Once the foundational server is built, try these additional features and enhancements. 
 *   **Why:** The server you built is just a starting point for learning all about generative AI and LLMs.
 
+***
 
 **[Glossary of Terms](instructions/z1_glossary.md)**
 
