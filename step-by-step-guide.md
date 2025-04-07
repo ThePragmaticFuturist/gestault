@@ -87,13 +87,11 @@ This structured approach ensures that the foundation is solid before adding more
 
 ***
 
-**[Step A: Environment Setup](instructions/z3_environment_setup_quickstart.md)**
 
-**[Step B: CUDA Environment Setup](instructions/setup_1_cuda_environment_setup_guide.md)**
+**[Setup 1: CUDA Environment Setup](instructions/setup_1_cuda_environment_setup_guide.md)**
 
-**[Step C: Required Python Package Installation](instructions/setup_2_python_required_packages_installation.md)**
+**[Setup 2: Required Python Package Installation](instructions/setup_2_python_required_packages_installation.md)**
 
-**[Step D: Glossary of Terms](instructions/z1_glossary.md)**
 
 ***
 
@@ -162,4 +160,7 @@ This structured approach ensures that the foundation is solid before adding more
 *   **What:** Once the foundational server is built, try these additional features and enhancements. 
 *   **Why:** The server you built is just a starting point for learning all about generative AI and LLMs.
 
-**[Citations and Additional References](instructions/citations_and_references.md)**
+
+**[Glossary of Terms](instructions/z1_glossary.md)**
+**[Citations and Additional References](instructions/z2_citations_and_references.md)**
+**[Environment Setup](instructions/z3_environment_clone_setup_quickstart.md)**
