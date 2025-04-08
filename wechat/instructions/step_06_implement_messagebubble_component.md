@@ -1,4 +1,4 @@
-**Step 6: Implement `MessageBubble` Component**
+# Step 6: Implement `MessageBubble` Component**
 
 *   **What:** Displays a single message, styled differently based on the role (`user` or `assistant`).
 *   **Why:** The visual representation of each turn in the conversation.
