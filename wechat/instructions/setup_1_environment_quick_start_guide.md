@@ -90,8 +90,8 @@ Okay, let's start building the React frontend for our RAG LLM server. We'll begi
 
 1.  **Create React Project using Vite:** Vite is a modern, fast build tool for web development that simplifies setting up React projects. Open your terminal in the directory where you want to create your frontend project (this should be *separate* from your Python backend project directory).
     ```bash
-    # Replace 'rag-chat-ui' with your desired project name
-    npm create vite@latest rag-chat-ui --template react
+    # Replace 'wechat' with your desired project name
+    npm create vite@latest wechat --template react
     ```
     *   Follow the prompts:
         *   It might ask for the project name again.
@@ -100,7 +100,7 @@ Okay, let's start building the React frontend for our RAG LLM server. We'll begi
 
 2.  **Navigate into Project Directory:**
     ```bash
-    cd rag-chat-ui
+    cd wechat
     ```
 
 3.  **Install Dependencies:** npm needs to download the libraries required by the basic React template.
