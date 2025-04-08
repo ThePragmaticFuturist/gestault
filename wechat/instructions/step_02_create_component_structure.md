@@ -1,4 +1,4 @@
-**Step 2: Create Component Structure**
+# Step 2: Create Component Structure
 
 *   **What:** Create folders and files for our main chat UI components.
 *   **Why:** To organize the code logically and make it easier to manage and style individual parts. We will use **CSS Modules** for styling to keep styles scoped to their components, fulfilling the "custom CSS per component" requirement without needing frameworks. CSS Modules automatically generate unique class names, preventing conflicts.
