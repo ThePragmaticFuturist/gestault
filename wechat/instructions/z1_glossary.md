@@ -1,4 +1,4 @@
-**Glossary of Terms**
+# Glossary of Terms
 
 *   **React:** A JavaScript library for building user interfaces, particularly single-page applications, using a component-based architecture.
 *   **Component:** A reusable, self-contained piece of UI (User Interface) in React (e.g., `MessageBubble`, `MessageInput`). Written as JavaScript functions or classes.
