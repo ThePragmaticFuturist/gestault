@@ -1,4 +1,4 @@
-**Step 1: Clean Up Default Project**
+# Step 1: Clean Up Default Project
 
 *   **What:** Remove the default Vite/React demo content.
 *   **Why:** To start with a clean slate for our chat application.
