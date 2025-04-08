@@ -1,4 +1,4 @@
-**Step 3: Implement `App.jsx` (Main Container)**
+# Step 3: Implement `App.jsx` (Main Container)
 
 *   **What:** Set up the main application layout and basic state management for messages and the input field.
 *   **Why:** The `App` component will orchestrate the overall application, hold the conversation state, and pass data/functions down to child components.
