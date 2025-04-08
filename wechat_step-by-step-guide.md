@@ -83,4 +83,4 @@
 
 ***   
 
-**[Setup 1: Environment Quick Setup](wechat/instructions/setup_1_environment_quick_setup.md)**
+**[Setup 1: Environment Setup Quick Start Guide](wechat/instructions/setup_1_environment_quick_setup.md)**
