@@ -1,4 +1,4 @@
-**Step 5: Implement `MessageList` Component**
+# Step 5: Implement `MessageList` Component**
 
 *   **What:** Renders the individual message bubbles from the `messages` array. Handles scrolling to the bottom.
 *   **Why:** To iterate through messages and manage the display flow within the `ChatWindow`.
