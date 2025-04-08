@@ -1,4 +1,4 @@
-**Step 4: Implement `ChatWindow` Component**
+# Step 4: Implement `ChatWindow` Component
 
 *   **What:** A container component that receives the list of messages and renders the `MessageList`.
 *   **Why:** To provide a dedicated area for the conversation display, handling potential scrolling.
