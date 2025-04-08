@@ -1,4 +1,4 @@
-**Step 8: Run and Verify**
+# Step 8: Run and Verify**
 
 *   If the development server (`npm run dev`) is still running, your browser should have automatically updated. If not, restart it.
 *   You should now see a basic chat interface:
