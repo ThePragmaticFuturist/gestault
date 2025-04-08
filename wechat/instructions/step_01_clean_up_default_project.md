@@ -3,7 +3,7 @@
 *   **What:** Remove the default Vite/React demo content.
 *   **Why:** To start with a clean slate for our chat application.
 *   **How:**
-    1.  Open the `rag-chat-ui` project folder in your code editor (VS Code).
+    1.  Open the `wechat` project folder in your code editor (VS Code).
     2.  Edit `src/App.jsx`: Remove the boilerplate content inside the `return (...)` statement and the `useState` hook. Replace it with a basic structure:
         ```jsx
         // src/App.jsx
