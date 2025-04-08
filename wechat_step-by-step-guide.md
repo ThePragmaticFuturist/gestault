@@ -80,3 +80,7 @@
     *   Is the code functional (even with placeholders)?
     *   Is the explanation logical?
     *   (Self-correction): Initially, I might forget to explicitly mention CSS Modules, but realizing the "no frameworks" and "custom CSS per component" requirements makes them the ideal solution to introduce. Ensure the import/usage syntax is shown. Ensure basic styling makes the app *look* like a chat app immediately. Ensure the flow of props (state and handlers) is explained.
+
+***   
+
+**[Setup 1: Environment Quick Setup](wechat/instructions/setup_1_environment_quick_setup.md)**
