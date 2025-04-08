@@ -1,6 +1,4 @@
-**[d] Future Features for WeChat React App**
-
-*(Building on the "Future Features" for the backend)*
+**Future Features for WeChat React App**
 
 **Core Chat Functionality:**
 
