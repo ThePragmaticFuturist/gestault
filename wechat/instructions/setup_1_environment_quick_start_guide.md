@@ -1,4 +1,4 @@
-**Setup 1: Environment Setup Quick Start Guide**
+# Setup 1: Environment Setup Quick Start Guide #
 
 We will be using Vite to build our WeChat web app instead of Create React App (CRA), which was the go-to tool for spinning up a React project. Vite (pronounced "veet") is a newer and much faster alternative, and it’s increasingly becoming the new standard. Here's why developers (and companies) are favoring Vite over CRA or similar setups:
 
