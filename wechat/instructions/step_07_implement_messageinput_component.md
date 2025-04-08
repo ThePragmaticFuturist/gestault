@@ -1,4 +1,4 @@
-**Step 7: Implement `MessageInput` Component**
+# Step 7: Implement `MessageInput` Component**
 
 *   **What:** Provides the text input field and send button.
 *   **Why:** Allows the user to type and submit their messages.
