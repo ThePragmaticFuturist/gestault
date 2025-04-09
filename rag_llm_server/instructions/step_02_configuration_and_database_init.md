@@ -449,9 +449,34 @@
     # app/main.py
     import uvicorn
     from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
     import datetime
     import sys
     import os
+    
+    # --- FastAPI Application Setup ---
+    app = FastAPI(
+        title=settings.APP_NAME,
+        description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
+        version="0.1.0",
+    )
+
+    origins = [
+        "http://localhost",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        # --- Specify Methods and Headers ---
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], # Explicitly allow POST and OPTIONS
+        allow_headers=["Content-Type", "Authorization", "Accept", "Origin"], # Explicitly allow Content-Type and others
+        # --- End Specification ---
+    )
+    print(f"CORS Middleware enabled for origins: {origins}")
 
     # Add project root to the Python path (adjust based on your run environment)
     # This allows imports like `from core.config import settings`
@@ -483,14 +508,6 @@
         print(f"FATAL: Failed to initialize database or ChromaDB: {e}")
         # Exit if critical initialization fails
         sys.exit(1)
-
-
-    # --- FastAPI Application Setup ---
-    app = FastAPI(
-        title=settings.APP_NAME,
-        description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
-        version="0.1.0",
-    )
 
     # --- Event Handlers for Database Connections ---
     @app.on_event("startup")
