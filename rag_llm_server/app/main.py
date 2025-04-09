@@ -1,6 +1,9 @@
 # app/main.py
 import uvicorn
 from fastapi import FastAPI
+
+from fastapi.middleware.cors import CORSMiddleware
+
 import datetime
 import sys # Make sure sys is imported
 import os
@@ -12,6 +15,45 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 print(f"Project root added to sys.path: {project_root}")
 # print(f"Current sys.path: {sys.path}") # Optional: Uncomment for more detail
+
+# Continue with other imports
+from core.config import settings
+from db.database import connect_db, disconnect_db, create_metadata_tables, get_or_create_collections
+from services.embedding_service import get_embedding_model
+
+from services.system_service import shutdown_nvml
+from services.llm_service import _unload_current_backend # Import unload function
+
+# --- Core Application Setup ---
+print("Creating FastAPI app instance...")
+app = FastAPI(
+    title=settings.APP_NAME,
+    description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions. Created by Ken Hubbell, The Pragmatic Futurist LLC.",
+    version="0.1.0",
+)
+print("FastAPI app instance created.")
+
+# --- ADD CORS MIDDLEWARE CONFIGURATION ---
+# DefineAh allowed origins (adjust for development/production)
+# For development, allowing localhost ports is common.
+# For production, list your specific frontend domain(s).
+origins = [
+    "http://localhost",         # Allow requests from base localhost
+    "http://localhost:5173",    # Default Vite dev port
+    "http://127.0.0.1:5173",    # Alternative localhost address
+    # Add your deployed frontend URL here for production, e.g.:
+    # "https://your-frontend-domain.com",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins, # List of origins allowed
+    allow_credentials=True, # Allow cookies (if, the classic CORS error! This is a standard security feature built into web browsers.
+    # Same-Origin Policy: By default, web browsers restrict web pages (like your React app running on `http://localhost:5173 needed in the future)
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], # Explicitly allow POST and OPTIONS
+    allow_headers=["Content-Type", "Authorization", "Accept", "Origin"], # Explicitly allow Content-Type and others
+)
+print(f"CORS Middleware enabled for origins: {origins}")
 
 # --- Explicit Router Imports with Diagnostics ---
 print("-" * 20)
@@ -73,23 +115,6 @@ except Exception as e:
 print("-" * 20)
 
 # --- End Explicit Router Imports ---
-
-# Continue with other imports
-from core.config import settings
-from db.database import connect_db, disconnect_db, create_metadata_tables, get_or_create_collections
-from services.embedding_service import get_embedding_model
-
-from services.system_service import shutdown_nvml
-from services.llm_service import _unload_current_backend # Import unload function
-
-# --- Core Application Setup ---
-print("Creating FastAPI app instance...")
-app = FastAPI(
-    title=settings.APP_NAME,
-    description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
-    version="0.1.0",
-)
-print("FastAPI app instance created.")
 
 # --- Include Routers with Diagnostics ---
 print("-" * 20)
