@@ -28,6 +28,16 @@ Before we can handle documents, models, or chats, we need the fundamental web se
     ```
     *   `fastapi`: The web framework.
     *   `uvicorn`: An ASGI server to run our FastAPI application. `[standard]` includes useful extras like websocket support (which we might use later) and better performance.
+    *   `CORSMiddleware`: CORSMiddleware is part of Starlette, which is a FastAPI dependency, so you shouldn't need a separate install.
+    *   For "non-simple" cross-origin requests (like a POST request with a Content-Type header of application/json, which is what our React app sends), the browser first sends a preliminary OPTIONS request to the server. This is called a "preflight" request.
+
+    *  **Purpose:** The browser asks the server "Hey, is it okay if the actual request (the POST) comes from http://localhost:5173 with headers like Content-Type?".
+
+    *  **Server Response:** The server needs to respond to this OPTIONS request with the correct CORS headers (Access-Control-Allow-Origin, Access-Control-Allow-Methods, Access-Control-Allow-Headers) indicating permission.
+
+    *  **Success:** If the OPTIONS response includes headers allowing the origin, method (POST), and headers (Content-Type) of the intended actual request, the browser then proceeds to send the actual POST request.
+
+    *  **Failure:** If the OPTIONS response is missing required headers, indicates disallowed methods/headers, or is an error (like the 400 Bad Request you're seeing), the browser stops and reports "CORS Preflight Did Not Succeed".
 
 4.  **Create the Main Application File (`main.py`):**
 
@@ -35,16 +45,35 @@ Before we can handle documents, models, or chats, we need the fundamental web se
     # main.py
     import uvicorn
     from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
     import datetime
     import os
 
     # --- Core Application Setup ---
+    
     # Create the main FastAPI application instance
     app = FastAPI(
         title="RAG LLM Server",
         description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
         version="0.1.0",
     )
+
+    origins = [
+        "http://localhost",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        # --- Specify Methods and Headers ---
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], # Explicitly allow POST and OPTIONS
+        allow_headers=["Content-Type", "Authorization", "Accept", "Origin"], # Explicitly allow Content-Type and others
+        # --- End Specification ---
+    )
+    print(f"CORS Middleware enabled for origins: {origins}")
 
     # --- Basic Root Endpoint ---
     @app.get("/")
