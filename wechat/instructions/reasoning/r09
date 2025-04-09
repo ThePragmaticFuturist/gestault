@@ -1,0 +1,76 @@
+Here's a thinking process for implementing the API integration in `App.jsx`:
+
+1.  **Goal:** Replace the `setTimeout` echo simulation in `handleSendMessage` with a real API call to the backend (`POST /api/v1/sessions/{session_id}/messages`) to get an AI response.
+
+2.  **Identify Necessary Information:** To make the API call, we need:
+    *   The backend server URL (e.g., `http://localhost:8000`). This should be configurable.
+    *   The `session_id`. We don't have session management yet, so we'll need to create/fetch one first.
+    *   The user's message content (`inputValue`).
+
+3.  **Plan the `handleSendMessage` Flow:**
+    *   Check if the input value is empty; if so, return.
+    *   Format the user message object (`{ role: 'user', content: inputValue }`).
+    *   Update the UI immediately with the user's message (`setMessages(...)`).
+    *   Clear the input field (`setInputValue('')`).
+    *   **NEW:** Get or create a `session_id`.
+        *   How? For now, let's assume we always need one. The simplest initial approach is to create a *new* session on the *first* message send if we don't have an ID stored, or reuse an existing one stored in state.
+    *   **NEW:** Make the `fetch` call to `POST /api/v1/sessions/{session_id}/messages`.
+        *   Method: `POST`
+        *   Headers: `Content-Type: application/json`, `Accept: application/json`
+        *   Body: JSON stringified object containing `{ "content": userMessage.content, "role": "user" }`.
+    *   **NEW:** Handle the `fetch` response:
+        *   Check if the response is `ok` (status 200-299).
+        *   If OK, parse the JSON response body. This body should be the `ChatMessageResponse` containing the *assistant's* message.
+        *   Extract the assistant's message details (`role`, `content`).
+        *   Update the UI with the assistant's message (`setMessages(...)`).
+        *   If NOT OK (error), parse the error response if possible (FastAPI often sends JSON errors). Log the error. Display an error message in the chat UI (maybe as a special assistant message).
+    *   **NEW:** Handle potential network errors during the `fetch` call (using `try...catch`). Log the error and display an error message.
+    *   **NEW:** Add loading state? Yes, good idea. Set a loading state before the API call, clear it after receiving the response or error. Use this state to potentially disable the input/button or show a visual indicator.
+
+4.  **Implement Session Management (Minimal):**
+    *   Add a `sessionId` state variable (`useState(null)`).
+    *   In `handleSendMessage`, check if `sessionId` is null.
+    *   If null, call a new async function `ensureSession`.
+    *   `ensureSession`:
+        *   Make a `fetch` call to `POST /api/v1/sessions/`.
+        *   Method: `POST`
+        *   Headers: `Content-Type: application/json`, `Accept: application/json`
+        *   Body: `{}` (or maybe include document IDs later?).
+        *   Handle response: If OK, parse JSON, get the `id` from the response, update the `sessionId` state, and return the ID. If error, log/handle it, return null.
+    *   Modify `handleSendMessage` to wait for `ensureSession` and only proceed if a valid `sessionId` is obtained.
+
+5.  **Implement Loading State:**
+    *   Add an `isLoading` state variable (`useState(false)`).
+    *   Set `isLoading(true)` right before the API call sequence starts in `handleSendMessage`.
+    *   Set `isLoading(false)` inside a `finally` block after the `fetch` call (or within both success and error handling paths) to ensure it always gets reset.
+    *   Pass `isLoading` down to `MessageInput` and disable the input/button when true. (Maybe add a visual indicator later).
+
+6.  **Refine Error Handling:**
+    *   When an API call fails (fetch error or bad HTTP status), create a specific "error" message object (`{ role: 'assistant', content: 'Sorry, I encountered an error...', isError: true }` - add an `isError` flag).
+    *   Update `MessageBubble` to potentially style error messages differently (e.g., red background or text).
+
+7.  **Configuration:**
+    *   Hardcoding the API URL (`http://localhost:8000`) is bad practice. Use an environment variable. Vite uses `import.meta.env.VITE_...`.
+    *   Create a `.env` file in the `rag-chat-ui` project root.
+    *   Add `VITE_API_BASE_URL=http://localhost:8000` to the `.env` file.
+    *   Access it in `App.jsx` using `import.meta.env.VITE_API_BASE_URL`.
+    *   Remember to add `.env` to the `.gitignore` in the UI project.
+
+8.  **Code Structure (`App.jsx`):**
+    *   Keep state variables at the top.
+    *   Define helper functions (`ensureSession`, `handleSendMessage`).
+    *   Return the JSX structure, passing down necessary state and handlers as props.
+
+9.  **Review and Test:**
+    *   Does the session get created on the first message?
+    *   Does the API call happen correctly? Check backend logs.
+    *   Does the assistant response appear?
+    *   Does error handling work if the backend is down or returns an error?
+    *   Is the loading state disabling the input correctly?
+
+**(Self-Correction during thought process):**
+*   Initially thought about creating the session inside `handleSendMessage`, but making it a separate `ensureSession` function is cleaner.
+*   Need to make sure `handleSendMessage` becomes `async` since it now involves `await`ing `ensureSession` and the `fetch` call.
+*   Handling both network errors (`catch`) and bad HTTP responses (`!response.ok`) is important.
+*   Using a `finally` block for `setIsLoading(false)` is safer than putting it in both `try` and `catch`.
+*   Passing `isLoading` to `MessageInput` is necessary to disable it.
