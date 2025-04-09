@@ -546,6 +546,23 @@
         version="0.1.0",
     )
 
+    origins = [
+        "http://localhost",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        # --- Specify Methods and Headers ---
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], # Explicitly allow POST and OPTIONS
+        allow_headers=["Content-Type", "Authorization", "Accept", "Origin"], # Explicitly allow Content-Type and others
+        # --- End Specification ---
+    )
+    print(f"CORS Middleware enabled for origins: {origins}")
+
     # --- Event Handlers for Database Connections ---
     # ... (keep startup/shutdown events)
 
