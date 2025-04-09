@@ -12,6 +12,7 @@ Add the check at the beginning of the `startup_event` function.
 # app/main.py
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import datetime
 import sys # Import sys for exiting
 import os
@@ -25,6 +26,30 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 print(f"Project root added to sys.path: {project_root}")
+
+# --- FastAPI Application Setup ---
+app = FastAPI(
+   title=settings.APP_NAME,
+   description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
+   version="0.1.0",
+)
+
+origins = [
+   "http://localhost",
+   "http://localhost:5173",
+   "http://127.0.0.1:5173",
+]
+ 
+app.add_middleware(
+   CORSMiddleware,
+   allow_origins=origins,
+   allow_credentials=True,
+   # --- Specify Methods and Headers ---
+   allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], # Explicitly allow POST and OPTIONS
+   allow_headers=["Content-Type", "Authorization", "Accept", "Origin"], # Explicitly allow Content-Type and others
+   # --- End Specification ---
+)
+print(f"CORS Middleware enabled for origins: {origins}")
 
 # Import routers
 # ... (document, sessions, models, system imports - keep diagnostic prints if desired) ...
@@ -106,16 +131,6 @@ try:
 except Exception as e:
     print(f"FATAL: Failed to initialize database/ChromaDB structures: {e}", file=sys.stderr)
     sys.exit(1)
-
-
-print("Creating FastAPI app instance...")
-app = FastAPI(
-    title=settings.APP_NAME,
-    description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
-    version="0.1.0",
-)
-print("FastAPI app instance created.")
-
 
 # --- Event Handlers ---
 @app.on_event("startup")
