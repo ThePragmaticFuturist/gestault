@@ -2,6 +2,8 @@
 
 Okay, let's integrate the API call to your RAG LLM backend into the React app. We'll replace the `setTimeout` echo with a `fetch` call and add minimal session management (creating a session on the first message).
 
+[Reasoning behind the code](reasoning/r09.md)  
+
 **1. Configure API Base URL**
 
 *   **Create `.env` file:** In the root of your `rag-chat-ui` project (alongside `package.json`), create a file named `.env`.
