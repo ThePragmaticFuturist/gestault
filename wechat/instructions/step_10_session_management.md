@@ -10,7 +10,7 @@ We'll add:
 *   Refine loading/error handling in `ensureSession`.
 
 ```jsx
-// src/App.jsx
+// // src/App.jsx   <<<--- Step 10
 import React, { useState, useEffect, useCallback } from 'react'; // Import useCallback
 import ChatWindow from './components/ChatWindow/ChatWindow';
 import MessageInput from './components/MessageInput/MessageInput';
@@ -92,16 +92,16 @@ function App() {
 
   // --- Effect to create session on initial load ---
   useEffect(() => {
-    console.log("App component mounted. Ensuring session exists.");
+    console.log("App component mounted. Ensuring initial session exists.");
     // Use an IIAFE (Immediately Invoked Async Function Expression)
     // because useEffect callback itself cannot be async directly.
+
+    setIsLoading(true); // Set loading true *before* calling ensureSession on initial load
     (async () => {
-      await ensureSession();
-      // Initial session creation loading is handled within ensureSession
-      // No need to set isLoading here unless we want to block input on initial load
+      await ensureSession(); // Initial session creation loading is handled within ensureSession
+      setIsLoading(false); // Set loading false *after* initial ensureSession completes
     })();
-    // Empty dependency array means this runs only once when component mounts
-  }, [ensureSession]); // Include ensureSession because it's defined outside but used inside
+  }, [ensureSession]); // Run only once on mount // Include ensureSession because it's defined outside but used inside
 
 
   // --- Handle Sending a Message ---
@@ -178,14 +178,13 @@ function App() {
 
   return (
     <div className={styles.appContainer}>
-      {/* --- Add New Chat Button --- */}
       <div className={styles.headerBar}>
          <h1 className={styles.appTitle}>RAG LLM Chat</h1>
-         <button onClick={startNewChat} className={styles.newChatButton} disabled={isLoading}>
+         {/* Disable New Chat if session is creating OR message is sending */}
+         <button onClick={startNewChat} className={styles.newChatButton} disabled={isLoading || isSessionLoading}>
              New Chat
          </button>
       </div>
-      {/* ------------------------- */}
       <ChatWindow messages={messages} />
       <MessageInput
         value={inputValue}
@@ -193,7 +192,7 @@ function App() {
         onSend={handleSendMessage}
         disabled={isLoading || isSessionLoading} // Disable if message OR session is loading
       />
-       {/* Show more specific loading text */}
+       {/* Show appropriate loading text */}
        {isSessionLoading && <div className={styles.loadingIndicator}>Creating session...</div>}
        {isLoading && !isSessionLoading && <div className={styles.loadingIndicator}>Assistant is thinking...</div>}
     </div>
