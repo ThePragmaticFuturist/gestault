@@ -1,4 +1,4 @@
-# Step 9: API Integration**
+# Step 9: API Integration
 
 Okay, let's integrate the API call to your RAG LLM backend into the React app. We'll replace the `setTimeout` echo with a `fetch` call and add minimal session management (creating a session on the first message).
 
