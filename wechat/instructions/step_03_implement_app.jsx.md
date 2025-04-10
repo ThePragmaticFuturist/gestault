@@ -73,16 +73,48 @@
     *   Create `src/App.module.css`:
         ```css
         /* src/App.module.css */
+        html, body, #root { /* #root is the default div React mounts into */
+          height: 100%;
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box; /* Include padding/border in element's total width/height */
+        }
+        
+        /* Optionally set a base font */
+        body {
+          font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+          line-height: 1.5;
+          background-color: #e9e9e9; /* Example: Light grey background outside the app */
+        }
+        
+        /* Ensure the root div also behaves correctly */
+        #root {
+           display: flex; /* Use flexbox on root */
+           justify-content: center; /* Center children horizontally */
+           align-items: center; /* Center children vertically */
+           min-height: 100vh; /* Ensure it takes at least full viewport height */
+        }
+        
+        /* You might need this if the above doesn't work */
+        body {
+           display: flex;
+           justify-content: center;
+           align-items: center;
+           min-height: 100vh;
+        }
+        
         .appContainer {
-          display: flex;
+           display: flex;
           flex-direction: column;
-          height: 100vh; /* Full viewport height */
-          max-width: 800px; /* Max width for readability */
-          margin: 0 auto; /* Center the container */
+          height: 100vh; /* Full viewport height OR maybe slightly less like 95vh if centering vertically */
+          max-height: 99vh; /* Prevent growing too tall */
+          width: 100vw; /* Take full width of parent */
+          max-width: 800px; /* Still constrain max width */
           border: 1px solid #ccc;
           box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-          overflow: hidden; /* Prevent content spill */
+          overflow: hidden;
           background-color: #f9f9f9;
+          border-radius: 8px; /* Optional: slightly rounded corners */
         }
 
         .appTitle {
