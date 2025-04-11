@@ -210,109 +210,44 @@ async def _load_local_model_task(
     finally:
         task_duration = time.time() - task_start_time
         logger.info(f"[Local Loader] Task for '{model_id}' finished in {task_duration:.2f}s. Status: {llm_state['status'].value}")
-        
-# async def _load_local_model_task(
-#     backend: LocalTransformersBackend, # Pass the backend instance
-#     model_id: str,
-#     device: str,
-#     quantization: Optional[str]
-# ):
-#     """Loads a model into the LocalTransformersBackend instance."""
-#     task_start_time = time.time()
-#     logger.info(f"[Local Loader] Starting task for '{model_id}' on device '{device}' q: '{quantization}'...")
-
-#     # No need to unload here, unload is handled before calling this task if needed
-
-#     llm_state["status"] = LLMStatus.LOADING # Update global status
-#     llm_state["last_error"] = None
-#     backend.model_name_or_path = model_id # Tentative assignment
-
-#     try:
-#         load_start_time = time.time()
-#         quantization_config = None
-#         pipeline_device_map = device if device != "cpu" else None
-#         if quantization:
-#              # ... (Quantization config logic - same as before) ...
-#               if quantization == "8bit" and torch.cuda.is_available():
-#                  quantization_config = BitsAndBytesConfig(load_in_8bit=True)
-#                  logger.info("[Local Loader] Applying 8-bit quantization.")
-#                  pipeline_device_map = "auto"
-#               elif quantization == "4bit" and torch.cuda.is_available():
-#                   quantization_config = BitsAndBytesConfig(
-#                      load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
-#                      bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
-#                  )
-#                   logger.info("[Local Loader] Applying 4-bit quantization (nf4).")
-#                   pipeline_device_map = "auto"
-#               else: # Fallback
-#                  logger.warning(f"[Local Loader] Quantization '{quantization}' not supported/applicable. Loading full precision.")
-#                  quantization = None
-
-#         logger.info(f"[Local Loader] Loading tokenizer for '{model_id}'...")
-#         tokenizer = AutoTokenizer.from_pretrained(
-#             model_id, trust_remote_code=True,
-#             cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve())
-#         )
-#         logger.info("[Local Loader] Tokenizer loaded.")
-
-#         logger.info(f"[Local Loader] Initializing pipeline: model='{model_id}', device_map='{pipeline_device_map}', q_config={'Set' if quantization_config else 'None'}")
-#         pipeline_instance = pipeline(
-#             task="text-generation", model=model_id, tokenizer=tokenizer,
-#             device_map=pipeline_device_map,
-#             torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-#             quantization_config=quantization_config, trust_remote_code=True,
-#         )
-#         load_time = time.time() - load_start_time
-#         logger.info(f"[Local Loader] Successfully loaded model '{model_id}' in {load_time:.2f}s.")
-
-#         max_len = getattr(pipeline_instance.model.config, "max_position_embeddings", None) \
-#                   or getattr(tokenizer, "model_max_length", None) \
-#                   or 1024
-#         logger.info(f"[Local Loader] Determined model max length: {max_len}")
-
-#         # --- Update the specific backend instance ---
-#         backend.pipeline = pipeline_instance
-#         backend.tokenizer = tokenizer
-#         backend.model_name_or_path = model_id # Confirm final name
-#         backend.load_config = {"device": device, "quantization": quantization}
-#         backend.max_model_length = max_len
-#         # --- Update global state ---
-#         llm_state["status"] = LLMStatus.READY
-#         llm_state["active_model"] = model_id
-#         llm_state["last_error"] = None
-
-#     except Exception as e:
-#         error_message = f"[Local Loader] Failed to load model '{model_id}': {type(e).__name__}: {e}"
-#         logger.error(error_message, exc_info=True)
-#         # Clear backend state
-#         backend.pipeline = None
-#         backend.tokenizer = None
-#         backend.model_name_or_path = None
-#         # Update global state
-#         llm_state["status"] = LLMStatus.FAILED
-#         llm_state["last_error"] = error_message
-#         llm_state["active_model"] = None # Clear model name on failure
-
-#     finally:
-#         task_duration = time.time() - task_start_time
-#         logger.info(f"[Local Loader] Task for '{model_id}' finished in {task_duration:.2f}s. Status: {llm_state['status'].value}")
-
 
 # --- Public Service Functions ---
 def get_llm_status() -> Dict[str, Any]:
     """Returns the current status and configuration of the active LLM backend."""
-    status_copy = {
-        "backend_type": llm_state["backend_type"],
-        "active_model": llm_state["active_model"],
-        "status": llm_state["status"].value,
-        "generation_config": llm_state["config"],
-        "last_error": llm_state["last_error"],
-        "backend_details": None
-    }
-    if llm_state["backend_instance"] is not None:
-        # Get specific details from the active backend
-        status_copy["backend_details"] = llm_state["backend_instance"].get_status_dict()
+    # status_copy = {
+    #     "backend_type": llm_state["backend_type"],
+    #     "active_model": llm_state["active_model"],
+    #     "status": llm_state["status"].value,
+    #     "generation_config": llm_state["config"],
+    #     "last_error": llm_state["last_error"],
+    #     "backend_details": None
+    # }
+    # if llm_state["backend_instance"] is not None:
+    #     # Get specific details from the active backend
+    #     status_copy["backend_details"] = llm_state["backend_instance"].get_status_dict()
 
+    # return status_copy
+
+    """Returns the current status and configuration of the active LLM backend."""
+    backend_instance = llm_state.get("backend_instance") # Get instance safely
+    backend_details = None
+    if backend_instance is not None:
+        try:
+            # Call get_status_dict only if instance exists
+            backend_details = backend_instance.get_status_dict()
+        except Exception as e:
+            # Catch potential errors during get_status_dict itself
+            logger.error(f"Error getting backend details from instance: {e}", exc_info=True)
+            backend_details = {"error": "Failed to retrieve backend details"}
+
+    status_copy = {
+        "backend_type": llm_state.get("backend_type"), # Use .get for safety
+        "active_model": llm_state.get("active_model"),
+        "status": llm_state.get("status", LLMStatus.INACTIVE).value, # Default to INACTIVE if status key somehow missing
+        "generation_config": llm_state.get("config"),
+        "last_error": llm_state.get("last_error"),
+        "backend_details": backend_details # Use the safely retrieved details
+    }
     return status_copy
 
 def update_llm_config(new_config: Dict[str, Any]) -> Dict[str, Any]:
