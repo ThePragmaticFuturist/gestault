@@ -89,15 +89,15 @@ function LLMManager() {
                  setInputModelName(data.active_model);
                  setSelectedExistingModel('');
             }
-
         }
+
+        setLoadMessage('');
       } else {
          // Default to 'local' in UI if inactive or fetched type is invalid
          setSelectedBackendType(BACKEND_TYPES.includes(data?.backend_type) ? data.backend_type : 'local');
          setInputModelName('');
          setSelectedExistingModel('');
       }
-
 
     } catch (error) {
       console.error("Failed to fetch LLM status:", error);
