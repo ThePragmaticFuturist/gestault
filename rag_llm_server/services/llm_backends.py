@@ -167,11 +167,24 @@ class LocalTransformersBackend(LLMBackendBase):
 
 
     def get_status_dict(self) -> Dict[str, Any]:
+
+        # --- ADD CHECK FOR self.model ---
+         model_device = None
+
+         if self.model is not None and hasattr(self.model, 'device'):
+              try:
+                   model_device = str(self.model.device)
+              except Exception as e:
+                   # Handle potential errors accessing device attribute if model state is weird
+                   logger.warning(f"Could not determine model device: {e}")
+                   model_device = "Error fetching device"
+         # --- END CHECK ---
+
          return {
              "active_model": self.model_name_or_path,
              "load_config": self.load_config,
              "max_model_length": self.max_model_length,
-             "model_device": str(self.model.device) if self.model else None, # Add device info
+             "model_device": model_device # str(self.model.device) if self.model else None, # Add device info
          }
 
     async def unload(self):
