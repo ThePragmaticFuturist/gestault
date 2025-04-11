@@ -170,21 +170,28 @@ class LocalTransformersBackend(LLMBackendBase):
 
         # --- ADD CHECK FOR self.model ---
          model_device = None
+         # Check if model exists FIRST before trying to access attributes
+         if self.model is not None:
+              # Now check if device attribute exists (should always for loaded HF models)
+              if hasattr(self.model, 'device'):
+                   try:
+                        # Safely get the device
+                        model_device = str(self.model.device)
+                   except Exception as e:
+                        logger.warning(f"Could not determine model device even though model exists: {e}")
+                        model_device = "Error fetching device"
+              else:
+                   # Should be rare, but handle case where model exists but no device attr
+                    logger.warning("Model object exists but lacks 'device' attribute.")
+                    model_device = "Unknown device"
 
-         if self.model is not None and hasattr(self.model, 'device'):
-              try:
-                   model_device = str(self.model.device)
-              except Exception as e:
-                   # Handle potential errors accessing device attribute if model state is weird
-                   logger.warning(f"Could not determine model device: {e}")
-                   model_device = "Error fetching device"
-         # --- END CHECK ---
+         # --- End Check ---
 
          return {
              "active_model": self.model_name_or_path,
              "load_config": self.load_config,
              "max_model_length": self.max_model_length,
-             "model_device": model_device # str(self.model.device) if self.model else None, # Add device info
+             "model_device": model_device, # Use the safely determined value
          }
 
     async def unload(self):
