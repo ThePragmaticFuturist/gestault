@@ -351,60 +351,6 @@ async def add_message_to_session(
         logger.error(f"[Session:{session_id}] Failed to store user message: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to store user message.")
 
-    # # --- Perform RAG Search ---
-    # rag_context = ""
-    # rag_chunk_ids = []
-    # rag_document_ids_in_session = session.get("rag_document_ids") # Get associated doc IDs
-
-    # if rag_document_ids_in_session:
-    #     logger.info(f"[Session:{session_id}] Performing RAG search within documents: {rag_document_ids_in_session}")
-    #     try:
-    #         doc_collection = chroma_client.get_collection(settings.DOCUMENT_COLLECTION_NAME)
-
-    #         # 1. Embed the user query
-    #         query_embedding = generate_embeddings([user_message_content])
-    #         if not query_embedding or not query_embedding[0]:
-    #             raise ValueError("Failed to generate query embedding for RAG.")
-
-    #         # 2. Build ChromaDB filter
-    #         chroma_where_filter = {
-    #             # Filter results to only include chunks from the documents linked to this session
-    #             "document_id": {"$in": rag_document_ids_in_session}
-    #         }
-    #         logger.debug(f"[Session:{session_id}] RAG ChromaDB filter: {chroma_where_filter}")
-
-    #         # 3. Query ChromaDB
-    #         results = doc_collection.query(
-    #             query_embeddings=query_embedding,
-    #             n_results=settings.RAG_TOP_K,
-    #             where=chroma_where_filter,
-    #             include=['documents', 'metadatas', 'distances'] # Get text, metadata, distance
-    #         )
-
-    #         # 4. Format RAG context
-    #         retrieved_docs = results.get('documents', [[]])[0]
-    #         retrieved_metadatas = results.get('metadatas', [[]])[0]
-    #         retrieved_ids = results.get('ids', [[]])[0] # Get chunk IDs
-
-    #         if retrieved_docs:
-    #             rag_chunk_ids = retrieved_ids # Store the IDs of retrieved chunks
-    #             context_parts = []
-    #             for i, doc_text in enumerate(retrieved_docs):
-    #                 metadata = retrieved_metadatas[i] if i < len(retrieved_metadatas) else {}
-    #                 source_info = f"Source(Doc: {metadata.get('document_id', 'N/A')}, Chunk: {metadata.get('chunk_index', 'N/A')})"
-    #                 context_parts.append(f"{source_info}:\n{doc_text}")
-    #             rag_context = "\n\n---\n\n".join(context_parts)
-    #             logger.info(f"[Session:{session_id}] Retrieved {len(retrieved_docs)} chunks for RAG context.")
-    #             logger.debug(f"[Session:{session_id}] RAG Context:\n{rag_context[:500]}...") # Log beginning of context
-
-    #     except Exception as e:
-    #         logger.error(f"[Session:{session_id}] RAG search failed: {e}", exc_info=True)
-    #         # Proceed without RAG context, maybe log a warning or add to assistant metadata
-    #         rag_context = "[RAG search failed]" # Indicate failure in context
-    # else:
-    #      logger.info(f"[Session:{session_id}] No RAG document IDs associated. Skipping RAG search.")
-
-
     # --- Perform Document RAG Search & Summarization ---
     rag_context = "" # Stores summarized document context
     rag_chunk_ids = []
@@ -766,3 +712,250 @@ async def list_messages_in_session(
 8.  **Test Loading:** Save the session, start a new chat, then load the saved session. Send another message and verify that the chat history RAG search still works correctly using the loaded session's context.
 
 This implements the long-term memory feature by indexing and retrieving chat history via RAG. Remember the latency and concurrency implications of the summarization step!
+
+*** 
+
+# Toggle the Long-term Memory #
+
+Add an API endpoint to toggle the long-term memory feature (chat history RAG search) on and off for a specific session. This gives the user control over whether past interactions influence the current context.
+
+We'll store this toggle state as part of the session's metadata in the SQLite `sessions` table.
+
+**1. Update Database Model (`db/models.py`)**
+
+Add a boolean column to the `sessions_table` to store the toggle state.
+
+```python
+# db/models.py
+import sqlalchemy
+import datetime
+from sqlalchemy.sql import func
+
+metadata = sqlalchemy.MetaData()
+
+sessions_table = sqlalchemy.Table(
+    "sessions",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.String, primary_key=True),
+    sqlalchemy.Column("name", sqlalchemy.String, nullable=True),
+    sqlalchemy.Column("created_at", sqlalchemy.DateTime(timezone=True), server_default=func.now()),
+    sqlalchemy.Column("last_updated_at", sqlalchemy.DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+    sqlalchemy.Column("llm_model_name", sqlalchemy.String, nullable=True),
+    sqlalchemy.Column("rag_document_ids", sqlalchemy.JSON, nullable=True),
+    # --- NEW: Long Term Memory Toggle ---
+    sqlalchemy.Column("long_term_memory_enabled", sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.true()), # Default to ON
+    # ----------------------------------
+    sqlalchemy.Column("metadata_tags", sqlalchemy.JSON, nullable=True),
+)
+
+# ... (chat_messages_table, documents_table, document_chunks_table remain the same) ...
+```
+
+*   Added `long_term_memory_enabled` as a `Boolean` column.
+*   `nullable=False`: We always want this to have a value.
+*   `server_default=sqlalchemy.true()`: New sessions will have long-term memory enabled by default. You could change this to `false()` if preferred.
+
+**Important:** If you've already created the database, adding this column requires a database migration. For simplicity in development *only*, you could delete your `rag_server.db` file and let the server recreate it on next startup with the new column. **Do not do this if you have important data!** For production, use a migration tool like Alembic ([https://alembic.sqlalchemy.org/](https://alembic.sqlalchemy.org/)).
+
+**2. Update Pydantic Models (`app/api/models/chat.py`)**
+
+Add the field to the response model so the current state is visible.
+
+```python
+# app/api/models/chat.py
+import datetime
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+
+# ... (SessionCreateRequest, MessageCreateRequest remain the same) ...
+
+class SessionMetadataResponse(BaseModel):
+    id: str
+    name: Optional[str] = None
+    created_at: datetime.datetime
+    last_updated_at: datetime.datetime
+    llm_model_name: Optional[str] = None
+    rag_document_ids: Optional[List[str]] = None
+    long_term_memory_enabled: bool # <-- ADDED
+    metadata_tags: Optional[Dict[str, Any]] = None
+
+    class Config:
+        orm_mode = True # Renamed to from_attributes in Pydantic v2
+
+# ... (ChatMessageResponse remains the same) ...
+```
+
+**3. Add API Endpoint (`app/api/endpoints/sessions.py`)**
+
+Create a new endpoint (e.g., a `PUT` or `PATCH` request) to update the toggle state.
+
+```python
+# app/api/endpoints/sessions.py
+import uuid
+import logging
+import datetime
+import asyncio
+from typing import List, Optional, Dict, Any # <-- Added Dict, Any if not already present
+from pydantic import BaseModel # <-- ADD BaseModel if not already present
+
+from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
+
+# ... (other imports: chat models, db, services etc.) ...
+
+# --- NEW: Request model for updating memory setting ---
+class SessionMemoryUpdateRequest(BaseModel):
+    enabled: bool
+
+# ... (router definition, helper function get_session_or_404) ...
+# ... (create_session, list_sessions, get_session, delete_session) ...
+
+# --- NEW Endpoint to Toggle Memory ---
+@router.put(
+    "/{session_id}/memory",
+    response_model=SessionMetadataResponse, # Return updated session metadata
+    summary="Enable or disable long-term memory (chat history RAG) for a session",
+)
+async def update_session_memory(
+    session_id: str,
+    update_request: SessionMemoryUpdateRequest
+):
+    """
+    Updates the long_term_memory_enabled setting for the specified session.
+    """
+    # Ensure session exists
+    session = await get_session_or_404(session_id)
+
+    new_value = update_request.enabled
+    current_value = session.get("long_term_memory_enabled")
+
+    if current_value == new_value:
+         logger.info(f"Long term memory for session {session_id} already set to {new_value}. No change.")
+         # Return current data without DB update
+         return SessionMetadataResponse.parse_obj(session)
+
+    update_query = sessions_table.update().where(
+        sessions_table.c.id == session_id
+    ).values(
+        long_term_memory_enabled=new_value,
+        # Optionally update last_updated_at timestamp? Debatable for settings change.
+        # last_updated_at=datetime.datetime.now(datetime.timezone.utc)
+    )
+
+    try:
+        await database.execute(update_query)
+        logger.info(f"Set long_term_memory_enabled to {new_value} for session {session_id}.")
+        # Fetch updated session data to return
+        updated_session = await get_session_or_404(session_id)
+        return SessionMetadataResponse.parse_obj(updated_session)
+    except Exception as e:
+        logger.error(f"Failed to update memory setting for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update session memory setting.")
+
+
+# --- Modify add_message_to_session ---
+@router.post(
+    "/{session_id}/messages",
+    # ... (decorator) ...
+)
+async def add_message_to_session(
+    session_id: str,
+    message_data: MessageCreateRequest,
+    background_tasks: BackgroundTasks,
+):
+    # ... (validation) ...
+
+    session = await get_session_or_404(session_id)
+    # --- Get the memory setting ---
+    long_term_memory_enabled = session.get("long_term_memory_enabled", True) # Default to True if missing? Or rely on DB default.
+
+    # ... (store user message) ...
+    # ... (Perform Document RAG Search & Summarization - unchanged) ...
+
+    # --- Perform Chat History RAG Search & Summarization (CONDITIONAL) ---
+    retrieved_history_context = ""
+    retrieved_history_ids = []
+    # --- Check the toggle before performing history search ---
+    if long_term_memory_enabled:
+        try:
+            logger.info(f"[Session:{session_id}] Long term memory enabled. Performing RAG search on chat history...")
+            # ... (Full logic for history RAG search and summarization) ...
+             # ... (fetches history_query_embedding, runs chroma query, summarizes) ...
+        except Exception as e:
+            logger.error(f"[Session:{session_id}] Chat history RAG search failed: {e}", exc_info=True)
+            retrieved_history_context = "[History RAG search failed]"
+    else:
+        logger.info(f"[Session:{session_id}] Long term memory disabled. Skipping chat history RAG search.")
+        # Ensure context is empty if disabled
+        retrieved_history_context = ""
+        retrieved_history_ids = []
+    # --- End Conditional History Search ---
+
+
+    # --- Retrieve RECENT Chat History (Verbatim - unchanged) ---
+    # ... (gets chat_history_str) ...
+
+    # --- Construct & Truncate Prompt (Unchanged - uses whatever contexts were populated) ---
+    # ... (checks llm status, tokenizer, max_length) ...
+    # ... (calculates limits) ...
+    # ... (tokenizes/truncates doc_context, history_summary (retrieved_history_context), recent_history) ...
+    # ... (assembles final prompt) ...
+
+    # --- Update Metadata Initialization (Include history IDs if search ran) ---
+    assistant_message_metadata = {
+        "prompt_preview": None,
+        "rag_chunks_retrieved": rag_chunk_ids,
+        "relevant_history_retrieved": retrieved_history_ids, # Now correctly populated or []
+        "llm_call_error": None
+    }
+
+    # ... (check llm status/readiness) ...
+
+    # --- Call LLM Service (Unchanged) ---
+    # ... (calls generate_text if llm_ready) ...
+
+    # --- Store Assistant Message (Unchanged) ---
+    # ... (stores message, schedules indexing task, returns response) ...
+
+# ... (list_messages_in_session) ...
+
+```
+
+**Explanation of Changes in `sessions.py`:**
+
+1.  **New Model:** Added `SessionMemoryUpdateRequest` Pydantic model.
+2.  **New Endpoint:** Created `PUT /api/v1/sessions/{session_id}/memory`.
+    *   Takes the session ID from the path and the boolean `enabled` value from the request body.
+    *   Fetches the session to ensure it exists.
+    *   Checks if the value needs changing to avoid unnecessary DB writes.
+    *   Executes an SQL `UPDATE` statement on the `sessions` table to set the `long_term_memory_enabled` column.
+    *   Fetches and returns the updated session metadata.
+3.  **Modified `add_message_to_session`:**
+    *   Reads the `long_term_memory_enabled` value from the session data fetched at the beginning.
+    *   Wraps the entire "Perform Chat History RAG Search & Summarization" block in an `if long_term_memory_enabled:` condition.
+    *   If disabled, it logs a message and ensures `retrieved_history_context` and `retrieved_history_ids` remain empty.
+    *   The subsequent prompt construction logic remains the same; it will simply not include the "RELEVANT PAST CONVERSATION" section if `retrieved_history_context` is empty.
+    *   The `assistant_message_metadata` now correctly includes `retrieved_history_ids` (which will be empty if the search was skipped).
+
+**4. Update Frontend (`App.jsx` and `SessionManager.jsx`) - Optional but Recommended**
+
+You could add a toggle switch or button in the `SessionManager` component to call this new API endpoint.
+
+*   **`SessionManager.jsx`:** Add a visual element (e.g., a checkbox or toggle switch) next to each session or for the active session. Add a handler function prop like `onToggleMemory(sessionId, isEnabled)`.
+*   **`App.jsx`:**
+    *   Add a state variable like `activeSessionMemoryEnabled` (initialized when loading a session).
+    *   Implement the `handleToggleMemory` function that makes the `PUT` request to `/api/v1/sessions/{session_id}/memory`.
+    *   Update the `activeSessionMemoryEnabled` state based on the API response.
+    *   Pass the state and handler down to `SessionManager`.
+
+**(This frontend part is optional for now, you can test the API directly first)**
+
+**Testing:**
+
+1.  Restart the backend server (remembering the database schema change - delete `.db` file *only if safe* or use migrations).
+2.  **Check Default:** Create a new session (`POST /sessions`). Then `GET /sessions/{session_id}`. Verify `long_term_memory_enabled` is `true`.
+3.  **Disable Memory:** Call `PUT /sessions/{session_id}/memory` with `{"enabled": false}` in the request body. Verify the response shows `long_term_memory_enabled: false`.
+4.  **Chat (Memory Off):** Send a message to this session (`POST /sessions/{session_id}/messages`). Check the backend logs - you should see "Long term memory disabled. Skipping chat history RAG search." The prompt construction logs should not include the "RELEVANT PAST CONVERSATION" section.
+5.  **Enable Memory:** Call `PUT /sessions/{session_id}/memory` with `{"enabled": true}`. Verify the response shows `true`.
+6.  **Chat (Memory On):** Send another message to the session. Check the backend logs - you should now see "Performing RAG search on chat history..." (assuming some history has been indexed for this session). The prompt construction logs *should* now include the relevant history section (if any was found and summarized).
+
+This provides API control over the long-term memory feature for each chat session.
