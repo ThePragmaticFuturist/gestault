@@ -60,12 +60,50 @@ function App() {
     setIsChatDirty(true);
   }, []);
 
-  // --- Load Saved Sessions Index (unchanged) ---
-  const loadSessionIndex = useCallback(() => { /* ... */ }, []);
-  useEffect(() => { loadSessionIndex(); }, [loadSessionIndex]);
+  // --- Load Saved Sessions Index on Mount ---
+  const loadSessionIndex = useCallback(() => {
+    try {
+      const indexJson = localStorage.getItem(SESSION_INDEX_KEY);
+      const index = indexJson ? JSON.parse(indexJson) : [];
+      // Sort by date descending
+      index.sort((a, b) => new Date(b.last_updated_at) - new Date(a.last_updated_at));
+      setSavedSessions(index);
+      console.log("Loaded session index:", index);
+    } catch (error) {
+      console.error("Failed to load or parse session index:", error);
+      setSavedSessions([]); // Reset on error
+      localStorage.removeItem(SESSION_INDEX_KEY); // Clear potentially corrupted index
+    }
+  }, []);
 
-  // --- Update Session Index (unchanged) ---
-  const updateSessionIndex = useCallback((newSessionMetaData) => { /* ... */ }, []);
+  useEffect(() => {
+    loadSessionIndex();
+  }, [loadSessionIndex]); // Load index once on mount
+
+  // --- Function to update index in localStorage and state ---
+  const updateSessionIndex = useCallback((newSessionMetaData) => {
+    setSavedSessions(prevIndex => {
+      const existingIndex = prevIndex.findIndex(s => s.id === newSessionMetaData.id);
+      let updatedIndex;
+      if (existingIndex > -1) {
+        // Update existing entry
+        updatedIndex = [...prevIndex];
+        updatedIndex[existingIndex] = newSessionMetaData;
+      } else {
+        // Add new entry
+        updatedIndex = [...prevIndex, newSessionMetaData];
+      }
+      // Sort and save
+      updatedIndex.sort((a, b) => new Date(b.last_updated_at) - new Date(a.last_updated_at));
+      try {
+        localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(updatedIndex));
+      } catch (error) {
+        console.error("Failed to save session index to localStorage:", error);
+        // Optionally notify user about storage error
+      }
+      return updatedIndex;
+    });
+  }, []);
 
 
   // --- *** CORRECTED: Function to Ensure Backend Session Exists *** ---
