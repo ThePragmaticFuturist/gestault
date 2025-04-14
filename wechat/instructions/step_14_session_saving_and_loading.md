@@ -22,109 +22,70 @@ export const SESSION_PREFIX = 'rag_chat_session_';
 We need state for the list of saved sessions and a 'dirty' flag for unsaved changes.
 
 ```jsx
+We should keep the concept of needing a **Backend Session ID** for API calls separate from the **Frontend Active Session ID** which tracks the currently loaded chat in the UI.
+
+```jsx
 // src/App.jsx
-import React, { useState, useEffect, useCallback, useRef } from 'react'; // Added useRef
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ChatWindow from './components/ChatWindow/ChatWindow';
 import MessageInput from './components/MessageInput/MessageInput';
 import LLMManager from './components/LLMManager/LLMManager';
-import SessionManager from './components/SessionManager/SessionManager'; // <-- Import new component
+import SessionManager from './components/SessionManager/SessionManager';
 import styles from './App.module.css';
 
-// Use constants for keys
 const SESSION_INDEX_KEY = 'rag_chat_session_index';
 const SESSION_PREFIX = 'rag_chat_session_';
-
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-console.log("Using API Base URL:", API_BASE_URL);
-
 const INITIAL_MESSAGE = { role: 'assistant', content: 'Hello! How can I help you today?' };
 const TYPING_INDICATOR_ID = 'typing-indicator-message';
 
+console.log("Using API Base URL:", API_BASE_URL);
+
 function App() {
+  // --- Frontend State ---
   const [messages, setMessages] = useState([INITIAL_MESSAGE]);
   const [inputValue, setInputValue] = useState('');
-  const [sessionId, setSessionId] = useState(null); // Backend session ID for API calls
-  const [isLoading, setIsLoading] = useState(false);
-  const [isSessionLoading, setIsSessionLoading] = useState(false);
+  const [savedSessions, setSavedSessions] = useState([]); // Index from localStorage
+  const [activeFrontendSessionId, setActiveFrontendSessionId] = useState(null); // ID of the session loaded from localStorage
+  const [isChatDirty, setIsChatDirty] = useState(false);
 
-  // --- NEW State for Frontend Session Management ---
-  const [savedSessions, setSavedSessions] = useState([]); // List of {id, name, last_updated_at} from index
-  const [activeSessionId, setActiveSessionId] = useState(null); // Frontend ID of the *loaded* chat session
-  const [isChatDirty, setIsChatDirty] = useState(false); // Track unsaved changes
-  const sessionNameInputRef = useRef(null); // Ref for potential inline name editing
-  // -------------------------------------------------
+  // --- Backend Interaction State ---
+  const [backendSessionId, setBackendSessionId] = useState(null); // ID for API calls
+  const [isLoading, setIsLoading] = useState(false); // For message send/response
+  const [isSessionLoading, setIsSessionLoading] = useState(false); // For backend session *creation*
 
-  // --- Load Saved Sessions Index on Mount ---
-  const loadSessionIndex = useCallback(() => {
-    try {
-      const indexJson = localStorage.getItem(SESSION_INDEX_KEY);
-      const index = indexJson ? JSON.parse(indexJson) : [];
-      // Sort by date descending
-      index.sort((a, b) => new Date(b.last_updated_at) - new Date(a.last_updated_at));
-      setSavedSessions(index);
-      console.log("Loaded session index:", index);
-    } catch (error) {
-      console.error("Failed to load or parse session index:", error);
-      setSavedSessions([]); // Reset on error
-      localStorage.removeItem(SESSION_INDEX_KEY); // Clear potentially corrupted index
-    }
-  }, []);
-
-  useEffect(() => {
-    loadSessionIndex();
-  }, [loadSessionIndex]); // Load index once on mount
-
-  // --- Function to update index in localStorage and state ---
-  const updateSessionIndex = useCallback((newSessionMetaData) => {
-    setSavedSessions(prevIndex => {
-      const existingIndex = prevIndex.findIndex(s => s.id === newSessionMetaData.id);
-      let updatedIndex;
-      if (existingIndex > -1) {
-        // Update existing entry
-        updatedIndex = [...prevIndex];
-        updatedIndex[existingIndex] = newSessionMetaData;
-      } else {
-        // Add new entry
-        updatedIndex = [...prevIndex, newSessionMetaData];
-      }
-      // Sort and save
-      updatedIndex.sort((a, b) => new Date(b.last_updated_at) - new Date(a.last_updated_at));
-      try {
-        localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(updatedIndex));
-      } catch (error) {
-        console.error("Failed to save session index to localStorage:", error);
-        // Optionally notify user about storage error
-      }
-      return updatedIndex;
-    });
-  }, []);
-
-  // --- Add Error Message Helper (unchanged) ---
+  // --- Error Message Helper ---
   const addErrorMessage = useCallback((content) => {
     setMessages(prevMessages => [...prevMessages, { role: 'assistant', content: `Error: ${content}`, isError: true }]);
-    setIsChatDirty(true); // Adding error message makes chat dirty
+    setIsChatDirty(true);
   }, []);
 
-  // --- Backend Session Creation (unchanged, returns backend ID) ---
-  const ensureBackendSession = useCallback(async (forceNew = false) => {
-    // ... (This function remains the same as before, responsible ONLY for the backend session ID)
-    // ... (It sets the 'sessionId' state variable)
-        if (!forceNew && sessionId) {
-      return sessionId;
-    }
-    if(forceNew) {
-        setSessionId(null);
+  // --- Load Saved Sessions Index (unchanged) ---
+  const loadSessionIndex = useCallback(() => { /* ... */ }, []);
+  useEffect(() => { loadSessionIndex(); }, [loadSessionIndex]);
+
+  // --- Update Session Index (unchanged) ---
+  const updateSessionIndex = useCallback((newSessionMetaData) => { /* ... */ }, []);
+
+
+  // --- *** CORRECTED: Function to Ensure Backend Session Exists *** ---
+  const ensureBackendSession = useCallback(async () => {
+    // This function ONLY ensures we have a valid ID for API calls.
+    // It doesn't necessarily mean starting a *new* chat flow in the UI.
+    if (backendSessionId) {
+      console.debug("Using existing backend session:", backendSessionId);
+      return backendSessionId; // Return existing ID
     }
 
-    setIsSessionLoading(true);
-    let createdSessionId = null;
+    console.log("No active backend session, creating a new one...");
+    setIsSessionLoading(true); // Indicate loading *backend* session
+    let createdBackendSessionId = null;
 
     try {
-      console.log(forceNew ? "Forcing new backend session..." : "Creating initial backend session...");
       const response = await fetch(`${API_BASE_URL}/api/v1/sessions/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ name: "React UI Backend Session" }), // Generic name for backend session
+        body: JSON.stringify({ name: "React UI Backend Session" }), // Generic name ok
       });
 
       if (!response.ok) {
@@ -134,258 +95,222 @@ function App() {
       }
 
       const newSessionData = await response.json();
-      createdSessionId = newSessionData.id;
-      console.log("New backend session created/ensured:", createdSessionId);
-      setSessionId(createdSessionId); // Set backend session ID state
+      createdBackendSessionId = newSessionData.id;
+      console.log("New backend session created:", createdBackendSessionId);
+      setBackendSessionId(createdBackendSessionId); // Set the state variable
 
     } catch (error) {
       console.error("Backend session creation error:", error);
-      addErrorMessage(`Could not start backend session. ${error.message}`);
-      setSessionId(null);
+      addErrorMessage(`Could not contact server to start session. ${error.message}`);
+      setBackendSessionId(null); // Ensure null on error
     } finally {
-      setIsSessionLoading(false);
+      setIsSessionLoading(false); // Done trying to create backend session
     }
-    return createdSessionId;
-  }, [sessionId, addErrorMessage]);
+    return createdBackendSessionId; // Return new ID or null
+  }, [backendSessionId, addErrorMessage]); // Depends on backendSessionId
 
-  // --- Effect for initial backend session (unchanged) ---
+
+  // --- Effect for initial backend session ---
   useEffect(() => {
     console.log("App component mounted. Ensuring initial backend session exists.");
      (async () => {
-       await ensureBackendSession();
+       await ensureBackendSession(); // Call the correctly named function
      })();
-  }, [ensureBackendSession]);
+  }, [ensureBackendSession]); // Correct dependency
 
 
-  // --- Handle Sending a Message (Modified to set dirty flag) ---
+  // --- Handle Sending a Message ---
   const handleSendMessage = async () => {
     const messageText = inputValue.trim();
     if (!messageText || isLoading || isSessionLoading) return;
 
     const userMessage = { role: 'user', content: messageText };
-    // --- Add user message AND set chat dirty ---
     setMessages(prevMessages => [...prevMessages, userMessage]);
-    setIsChatDirty(true); // Mark chat as dirty
-    // --- End Add ---
-
+    setIsChatDirty(true);
     setInputValue('');
-    setIsLoading(true);
+    setIsLoading(true); // Start message loading
 
-    let currentBackendSessionId = sessionId;
+    // --- Use the 'backendSessionId' state variable ---
+    let currentBackendSessionId = backendSessionId;
 
     try {
+        // Try to get/create a backend session ID *before* sending the message
         if (!currentBackendSessionId) {
             currentBackendSessionId = await ensureBackendSession();
         }
+        // If still no backend ID after trying, we cannot proceed
         if (!currentBackendSessionId) {
-             setIsLoading(false);
+             console.error("Cannot send message without a valid backend session ID.");
+             // Error message was already added by ensureBackendSession if it failed
+             setIsLoading(false); // Stop message loading
              return;
         }
 
-        // ... (fetch call to send message - unchanged) ...
-        const response = await fetch(`${API_BASE_URL}/api/v1/sessions/${currentBackendSessionId}/messages`, { /* ... */ });
-        if (!response.ok) { throw new Error(/* ... */); }
-        const assistantMessageData = await response.json();
+        console.log(`Sending message to backend session ${currentBackendSessionId}:`, messageText);
 
-        let isBackendError = false;
-        if (assistantMessageData.content && typeof assistantMessageData.content === 'string' && assistantMessageData.content.startsWith('[ERROR:')) {
-            isBackendError = true;
+        // Add Typing Indicator
+        const typingIndicatorMessage = { id: TYPING_INDICATOR_ID, role: 'assistant', content: '...', isLoading: true };
+        setMessages(prevMessages => prevMessages.concat([typingIndicatorMessage]));
+
+        // --- Send message using currentBackendSessionId ---
+        const response = await fetch(`${API_BASE_URL}/api/v1/sessions/${currentBackendSessionId}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ content: messageText, role: 'user' }),
+        });
+
+        // Remove typing indicator *before* processing response
+        setMessages(prevMessages => prevMessages.filter(msg => msg.id !== TYPING_INDICATOR_ID));
+
+        if (!response.ok) {
+            let errorDetail = `Request failed with status ${response.status}`;
+            try { const errorData = await response.json(); errorDetail = errorData.detail || errorDetail; } catch (e) { /* Ignore */ }
+            throw new Error(errorDetail);
         }
 
-        // --- Add assistant message AND set chat dirty ---
+        const assistantMessageData = await response.json();
+        let isBackendError = assistantMessageData.content?.startsWith('[ERROR:') ?? false;
+
+        // Add actual assistant message
         setMessages(prevMessages => [...prevMessages, { ...assistantMessageData, isError: isBackendError }]);
-        setIsChatDirty(true); // Mark chat as dirty
-        // --- End Add ---
+        setIsChatDirty(true); // Assistant response also makes it dirty
 
     } catch (error) {
       console.error("Error during message send/receive:", error);
-      // addErrorMessage already sets isChatDirty
+      // Ensure typing indicator is removed on error too
+      setMessages(prevMessages => prevMessages.filter(msg => msg.id !== TYPING_INDICATOR_ID));
       addErrorMessage(`Could not get response. ${error.message}`);
     } finally {
-      setIsLoading(false);
+      setIsLoading(false); // Stop message loading indicator
     }
   };
 
-  // --- NEW Session Management Handlers ---
+  // --- Session Management Handlers (localStorage) ---
 
   const handleSaveSession = useCallback(async () => {
-    if (!messages || messages.length <= 1) { // Don't save empty/initial chats
-        alert("Nothing to save.");
-        return;
-    }
+    if (!messages || messages.length <= 1) { alert("Nothing to save."); return; }
 
-    // 1. Determine ID and Name
-    const currentFrontendId = activeSessionId || `session_${Date.now()}`; // Generate ID if new
-    const existingSession = savedSessions.find(s => s.id === currentFrontendId);
+    const currentFrontendId = activeFrontendSessionId || `session_${Date.now()}`;
+    const existingSessionMeta = savedSessions.find(s => s.id === currentFrontendId);
     const defaultName = `Session - ${new Date().toLocaleString()}`;
-    const sessionName = prompt("Enter a name for this session:", existingSession?.name || defaultName);
+    const sessionName = prompt("Enter a name for this session:", existingSessionMeta?.name || defaultName);
 
-    if (sessionName === null) return; // User cancelled prompt
+    if (sessionName === null) return;
 
-    setIsLoading(true); // Indicate saving activity
-    setErrorMessage('');
+    setIsLoading(true); setErrorMessage(''); // Use general loading indicator
 
     try {
-        // 2. Fetch current LLM status from backend
         let backendStatus = {};
-        try {
-            const statusResponse = await fetch(`${API_BASE_URL}/api/v1/models/status`);
-            if(statusResponse.ok) {
-                backendStatus = await statusResponse.json();
-            } else {
-                console.warn("Could not fetch LLM status for saving.");
-            }
-        } catch (statusError) {
-            console.error("Error fetching LLM status:", statusError);
-        }
+        try { /* ... fetch LLM status ... */ } catch (statusError) { /* ... */ }
 
-        // 3. Prepare session data object
         const nowISO = new Date().toISOString();
-        const sessionData = {
-            id: currentFrontendId,
-            name: sessionName || defaultName, // Use default if prompt returns empty
-            created_at: existingSession?.created_at || nowISO, // Keep original creation date if exists
+        const sessionDataToSave = { // Data saved to localStorage
+            id: currentFrontendId, // Frontend ID
+            name: sessionName || defaultName,
+            created_at: existingSessionMeta?.created_at || nowISO,
             last_updated_at: nowISO,
-            backend_session_id: sessionId, // Store the backend API session ID too
+            backend_session_id: backendSessionId, // Store the *current* backend ID used by this chat
             llm_backend_type: backendStatus?.backend_type,
             llm_active_model: backendStatus?.active_model,
             llm_generation_config: backendStatus?.generation_config,
-            messages: messages, // Store the whole message array
+            messages: messages.filter(msg => msg.id !== TYPING_INDICATOR_ID), // Don't save typing indicator
         };
 
-        // 4. Save to localStorage
-        localStorage.setItem(`${SESSION_PREFIX}${currentFrontendId}`, JSON.stringify(sessionData));
+        localStorage.setItem(`${SESSION_PREFIX}${currentFrontendId}`, JSON.stringify(sessionDataToSave));
 
-        // 5. Update the index
         updateSessionIndex({
-            id: sessionData.id,
-            name: sessionData.name,
-            last_updated_at: sessionData.last_updated_at,
+            id: sessionDataToSave.id,
+            name: sessionDataToSave.name,
+            last_updated_at: sessionDataToSave.last_updated_at,
         });
 
-        // 6. Update state
-        setActiveSessionId(currentFrontendId); // Ensure the active ID is set
-        setIsChatDirty(false); // Mark as saved
+        setActiveFrontendSessionId(currentFrontendId);
+        setIsChatDirty(false);
         alert("Session saved successfully!");
 
-    } catch (error) {
-        console.error("Failed to save session:", error);
-        addErrorMessage(`Could not save session. ${error.message}`);
-    } finally {
-        setIsLoading(false);
-    }
-  }, [activeSessionId, messages, savedSessions, updateSessionIndex, sessionId]); // Include sessionId
+    } catch (error) { /* ... error handling ... */ }
+    finally { setIsLoading(false); }
+  }, [activeFrontendSessionId, messages, savedSessions, updateSessionIndex, backendSessionId]); // Depend on backendSessionId
 
-  const handleLoadSession = useCallback((sessionIdToLoad) => {
+
+  const handleLoadSession = useCallback(async (frontendSessionIdToLoad) => { // Renamed param for clarity
     if (isChatDirty && !window.confirm("You have unsaved changes. Discard changes and load session?")) {
-      return; // User cancelled loading
+      return;
     }
+    console.log("Loading frontend session:", frontendSessionIdToLoad);
+    setIsLoading(true);
 
-    console.log("Loading session:", sessionIdToLoad);
-    setIsLoading(true); // Indicate loading
     try {
-        const sessionJson = localStorage.getItem(`${SESSION_PREFIX}${sessionIdToLoad}`);
-        if (!sessionJson) {
-            throw new Error("Session data not found in storage.");
-        }
+        const sessionJson = localStorage.getItem(`${SESSION_PREFIX}${frontendSessionIdToLoad}`);
+        if (!sessionJson) throw new Error("Session data not found in storage.");
         const sessionData = JSON.parse(sessionJson);
 
-        // Restore state
         setMessages(sessionData.messages || [INITIAL_MESSAGE]);
-        setActiveSessionId(sessionData.id);
-        setSessionId(sessionData.backend_session_id || null); // Restore backend session ID
-        setInputValue('');
-        setIsChatDirty(false); // Loaded state is not dirty initially
-        console.log("Session loaded successfully. Backend session ID:", sessionData.backend_session_id);
-        // Optional: Display loaded model info? Add to UI later.
-        // Optional: Try to set the backend model? Complex, skip for now.
-
-    } catch (error) {
-        console.error("Failed to load session:", error);
-        addErrorMessage(`Could not load session. ${error.message}`);
-        // Reset to a clean state?
-        startNewChat(); // Go to a new chat state on load failure
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isChatDirty, addErrorMessage]); // Add addErrorMessage dependency
-
-  const handleDeleteSession = useCallback((sessionIdToDelete) => {
-    const sessionToDelete = savedSessions.find(s => s.id === sessionIdToDelete);
-    if (!sessionToDelete) return;
-
-    if (!window.confirm(`Are you sure you want to delete session "${sessionToDelete.name}"?`)) {
-      return; // User cancelled deletion
-    }
-
-    console.log("Deleting session:", sessionIdToDelete);
-    try {
-        // Remove session data
-        localStorage.removeItem(`${SESSION_PREFIX}${sessionIdToDelete}`);
-
-        // Remove from index and update state/storage
-        setSavedSessions(prevIndex => {
-            const updatedIndex = prevIndex.filter(s => s.id !== sessionIdToDelete);
-            localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(updatedIndex));
-            return updatedIndex;
-        });
-
-        // If the deleted session was the active one, start a new chat
-        if (activeSessionId === sessionIdToDelete) {
-            startNewChat(false); // Pass false to avoid confirm prompt again
+        setActiveFrontendSessionId(sessionData.id);
+        // --- CRITICAL: Restore or create NEW backend session ---
+        // Option A: Try to reuse the saved backend ID (might be expired/invalid on server)
+        // setBackendSessionId(sessionData.backend_session_id || null);
+        // Option B (Safer): Always create a NEW backend session when loading an old chat
+        console.log("Creating a new backend session for loaded chat history...");
+        setBackendSessionId(null); // Clear old backend ID
+        const newBackendId = await ensureBackendSession(); // Create a new one
+        if (!newBackendId) {
+            // Handle error if new backend session couldn't be made for the loaded chat
+            throw new Error("Failed to create a new backend session for the loaded chat.");
         }
-        console.log("Session deleted successfully.");
+        console.log("Loaded frontend session will use new backend session:", newBackendId);
+        // ----------------------------------------------------
+        setInputValue('');
+        setIsChatDirty(false); // Initial loaded state is clean
 
-    } catch (error) {
-        console.error("Failed to delete session:", error);
-        addErrorMessage(`Could not delete session. ${error.message}`); // Show error in potentially new chat
-    }
-  }, [savedSessions, activeSessionId, addErrorMessage]); // Add addErrorMessage
+    } catch (error) { /* ... error handling ... */ }
+    finally { setIsLoading(false); }
+  }, [isChatDirty, addErrorMessage, ensureBackendSession]); // Added ensureBackendSession
 
-  // --- Modified Handler for New Chat Button ---
-  // Accepts optional flag to skip confirm prompt (used after delete)
+
+  const handleDeleteSession = useCallback((frontendSessionIdToDelete) => { /* ... unchanged ... */ }, [savedSessions, activeFrontendSessionId, addErrorMessage]);
+
+
+  // --- Corrected Handler for New Chat Button ---
   const startNewChat = useCallback((confirmIfDirty = true) => {
-    if (confirmIfDirty && isChatDirty && !window.confirm("You have unsaved changes. Discard changes and start a new chat?")) {
-        return; // User cancelled
-    }
+    if (confirmIfDirty && isChatDirty && !window.confirm(/* ... */)) return;
+
     console.log("Starting new chat...");
     setMessages([INITIAL_MESSAGE]);
     setInputValue('');
-    setSessionId(null); // Clear backend session ID
-    setActiveSessionId(null); // Clear frontend active session ID
+    setActiveFrontendSessionId(null); // Clear frontend active session ID
+    setBackendSessionId(null);      // Clear backend session ID state
     setIsLoading(false);
     setIsSessionLoading(false);
-    setIsChatDirty(false); // New chat is not dirty
-    // Ensure backend session is created for the next message
-    ensureBackendSession(true); // Force creation of a new backend session
-  }, [isChatDirty, ensureBackendSession]); // Add dependencies
-
+    setIsChatDirty(false);
+    // Force creation of a new backend session ID for the next message
+    ensureBackendSession(); // No need to force, logic handles null state
+  }, [isChatDirty, ensureBackendSession]); // Added ensureBackendSession
 
   return (
     <div className={styles.appContainer}>
-      {/* --- Pass Session Props --- */}
       <SessionManager
+        // Pass correct props
         savedSessions={savedSessions}
-        activeSessionId={activeSessionId}
+        activeSessionId={activeFrontendSessionId} // Pass frontend ID
         onLoadSession={handleLoadSession}
         onSaveSession={handleSaveSession}
         onDeleteSession={handleDeleteSession}
-        onNewChat={startNewChat} // Pass new chat handler
-        disabled={isLoading || isSessionLoading} // Disable controls while busy
+        onNewChat={startNewChat}
+        disabled={isLoading || isSessionLoading}
       />
-      {/* ------------------------- */}
-
       <div className={styles.chatArea}>
-        <ChatWindow messages={messages} />
-        <MessageInput
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          onSend={handleSendMessage}
-          disabled={isLoading || isSessionLoading}
-        />
-        {/* Loading Indicators */}
-        {isSessionLoading && <div className={styles.loadingIndicator}>Working on session...</div>}
-        {isLoading && !isSessionLoading && <div className={styles.loadingIndicator}>Assistant is thinking...</div>}
+        {/* ... ChatWindow, MessageInput */}
+         <ChatWindow messages={messages} />
+          <MessageInput
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onSend={handleSendMessage}
+            disabled={isLoading || isSessionLoading} // Disable if message OR backend session is loading
+          />
+          {/* Loading Indicators */}
+          {isSessionLoading && <div className={styles.loadingIndicator}>Connecting to backend session...</div>}
+          {isLoading && !isSessionLoading && <div className={styles.loadingIndicator}>Assistant is thinking...</div>}
       </div>
     </div>
   );
