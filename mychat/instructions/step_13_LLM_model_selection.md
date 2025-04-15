@@ -1,5 +1,7 @@
 # Step 13: Managing the LLM Connection #
 
+## Note - this file is out of sync with the src code due to some bugs I discovered and have now fixed ##
+
 Okay, let's add a dedicated component for managing the LLM connection. This will allow users to select between local/cached models, input a new model ID for local download, or configure an API backend connection.
 
 **1. Create `LLMManager` Component Files**
