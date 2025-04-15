@@ -12,6 +12,15 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# --- ADD Google AI Imports ---
+try:
+    import google.generativeai as genai
+    google_ai_available = True
+except ImportError:
+    google_ai_available = False
+    genai = None # Define genai as None if import fails
+# --- END ADD ---
+
 # --- Base Class ---
 class LLMBackendBase(abc.ABC):
     """Abstract base class for different LLM backends."""
@@ -133,34 +142,6 @@ class LocalTransformersBackend(LLMBackendBase):
             logger.info("Local LLM text generation complete.")
             return result
 
-            # # NOTE: Pipeline call itself is blocking CPU/GPU
-            # # Needs to be run in executor by the caller (llm_service.generate_text)
-            # outputs = self.pipeline(prompt, **generation_kwargs)
-
-            # full_generated_text = outputs[0]['generated_text']
-            # logger.debug(f"LLM Raw Output:\n{full_generated_text}")
-
-            # # Use the prompt structure marker defined in sessions.py
-            # response_marker = "\n### RESPONSE:" # Ensure this matches sessions.py
-            # prompt_marker_pos = prompt.rfind(response_marker)
-
-            # if prompt_marker_pos != -1:
-            #      response_start_pos = prompt_marker_pos + len(response_marker)
-            #      if full_generated_text.startswith(prompt[:response_start_pos]):
-            #           result = full_generated_text[response_start_pos:].strip()
-            #      else:
-            #           logger.warning("Generated text didn't start with the expected prompt prefix. Using full generated text.")
-            #           result = full_generated_text.strip()
-            # else:
-            #      logger.warning("Response marker not found in original prompt. Using full generated text.")
-            #      result = full_generated_text.strip()
-
-            # if not result:
-            #      logger.warning("Extraction resulted in an empty string.")
-
-            # logger.info("Local LLM text generation complete.")
-            # return result
-
         except Exception as e:
             logger.error(f"Local LLM text generation failed: {e}", exc_info=True)
             return None
@@ -215,38 +196,6 @@ class LocalTransformersBackend(LLMBackendBase):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         logger.info("Local model unloaded and memory cleared.")
-
-    # def get_status_dict(self) -> Dict[str, Any]:
-    #      return {
-    #          "active_model": self.model_name_or_path,
-    #          "load_config": self.load_config,
-    #          "max_model_length": self.max_model_length,
-    #          # Add any other relevant local status info
-    #      }
-
-    # async def unload(self):
-    #     """Unloads the local model and clears memory."""
-    #     logger.info(f"Unloading local model '{self.model_name_or_path}'...")
-    #     # Keep references to delete them explicitly
-    #     pipeline_to_del = self.pipeline
-    #     model_to_del = getattr(pipeline_to_del, 'model', None) if pipeline_to_del else None
-    #     tokenizer_to_del = self.tokenizer # Use self.tokenizer
-
-    #     self.pipeline = None
-    #     self.tokenizer = None
-    #     self.model_name_or_path = None
-    #     self.load_config = {}
-    #     self.max_model_length = None
-
-    #     del pipeline_to_del
-    #     del model_to_del
-    #     del tokenizer_to_del
-
-    #     import gc, torch # Import locally for unload
-    #     gc.collect()
-    #     if torch.cuda.is_available():
-    #         torch.cuda.empty_cache()
-    #     logger.info("Local model unloaded and memory cleared.")
 
 
 # --- Ollama Backend ---
@@ -424,3 +373,79 @@ class InstructLabBackend(LLMBackendBase):
     async def unload(self):
         await self.client.aclose()
         logger.info("InstructLabBackend httpx client closed.")
+
+# --- NEW: Gemini Backend ---
+class GeminiBackend(LLMBackendBase):
+    def __init__(self, api_key: str, model_name: str):
+        if not google_ai_available or genai is None:
+             raise ImportError("Attempted to initialize GeminiBackend, but 'google-generativeai' library is not installed. Please run 'pip install google-generativeai'.")
+
+        self.model_name = model_name
+        self.api_key = api_key
+        try:
+            # Configure the API key globally for the library (common pattern)
+            genai.configure(api_key=self.api_key)
+            # Create the specific model instance
+            self.model = genai.GenerativeModel(model_name=self.model_name)
+            logger.info(f"GeminiBackend initialized: Model='{self.model_name}' configured.")
+        except Exception as e:
+            logger.error(f"Failed to configure Gemini or initialize model '{self.model_name}': {e}", exc_info=True)
+            raise ValueError(f"Gemini configuration/initialization failed: {e}") from e
+
+    async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        logger.info(f"Generating text via Gemini backend (model: {self.model_name})...")
+
+        # Map internal config keys to Gemini GenerationConfig keys
+        gemini_config = genai.types.GenerationConfig(
+            # candidate_count=1, # Default is 1
+            # stop_sequences=["\n###"], # Example stop sequence
+            max_output_tokens=config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS),
+            temperature=config.get("temperature", settings.DEFAULT_LLM_TEMPERATURE),
+            top_p=config.get("top_p", settings.DEFAULT_LLM_TOP_P),
+            top_k=config.get("top_k", settings.DEFAULT_LLM_TOP_K), # Note: top_k >= 1
+        )
+        # Ensure top_k is valid for Gemini (must be >= 1)
+        if gemini_config.top_k is not None and gemini_config.top_k < 1:
+            logger.warning(f"Gemini requires top_k >= 1. Received {gemini_config.top_k}, setting to 1.")
+            gemini_config.top_k = 1
+
+        logger.debug(f"Gemini GenerationConfig: {gemini_config}")
+
+        try:
+            # Use the asynchronous generation method
+            response = await self.model.generate_content_async(
+                contents=prompt, # Send the full prompt string
+                generation_config=gemini_config,
+                # safety_settings=... # Optional: configure safety settings
+            )
+
+            # Extract text, handling potential blocks or missing text
+            if response.text:
+                 generated_text = response.text
+                 logger.info("Gemini generation successful.")
+                 logger.debug(f"Gemini Response: {generated_text[:500]}...")
+                 return generated_text.strip()
+            else:
+                 # Log details if text is missing (e.g., blocked by safety filters)
+                 logger.warning(f"Gemini response did not contain text. Prompt feedback: {response.prompt_feedback}. Finish reason: {getattr(response.candidates[0], 'finish_reason', 'N/A')}")
+                 # Consider checking response.candidates[0].content.parts if text is missing
+                 return "[ERROR: Gemini response empty or blocked]"
+
+        except Exception as e:
+            # Catch potential google API errors or other issues
+            logger.error(f"Gemini generation failed unexpectedly: {e}", exc_info=True)
+            # Example specific error check:
+            # if isinstance(e, google.api_core.exceptions.PermissionDenied):
+            #     return "[ERROR: Gemini API key invalid or lacks permissions]"
+            return f"[ERROR: Gemini generation failed - {type(e).__name__}]"
+
+    def get_status_dict(self) -> Dict[str, Any]:
+         return {
+             "active_model": self.model_name,
+             # Can add more details if needed, e.g., check API reachability
+         }
+
+    async def unload(self):
+        # No explicit unload/cleanup needed for the genai library typically
+        logger.info("GeminiBackend unload called (no action needed).")
+        pass # Nothing specific to unload
