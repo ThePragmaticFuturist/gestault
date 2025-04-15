@@ -152,7 +152,7 @@ async def get_model_config():
     Returns the current generation parameters (temperature, max_tokens, etc.).
     """
     status = get_llm_status()
-    if status["status"] != LLMStatus.LOADED.value:
+    if status["status"] != LLMStatus.READY.value:
         raise HTTPException(status_code=404, detail="No model is currently loaded.")
     return status.get("generation_config", {})
 
@@ -166,7 +166,7 @@ async def update_model_config(update_request: ModelUpdateRequest):
     Updates generation parameters for the currently loaded model.
     Does not require reloading the model.
     """
-    if llm_state["status"] != LLMStatus.LOADED:
+    if llm_state["status"] != LLMStatus.READY:
          raise HTTPException(status_code=404, detail="No model is currently loaded.")
 
     updates = update_request.get_updates()
