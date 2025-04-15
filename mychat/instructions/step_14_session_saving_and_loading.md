@@ -1,5 +1,7 @@
 # Step 14: Save, Load, and Manage Chat Sessions Locally #
 
+## Note - this file is out of sync with the src code due to some bugs I discovered and have now fixed ##
+
 Okay, let's add the functionality to save, load, and manage chat sessions using the browser's `localStorage`. This will involve:
 
 1.  Adding state in `App.jsx` to track saved sessions and whether the current chat has unsaved changes.
