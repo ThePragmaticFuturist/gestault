@@ -8,7 +8,7 @@ import datetime
 import sys # Make sure sys is imported
 import os
 
-from huggingface_hub import get_token, login # Import get_token
+from huggingface_hub import get_token, login, logout # Import get_token
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
@@ -22,7 +22,7 @@ from db.database import connect_db, disconnect_db, create_metadata_tables, get_o
 from services.embedding_service import get_embedding_model
 
 from services.system_service import shutdown_nvml
-from services.llm_service import _unload_current_backend # Import unload function
+from services.llm_service import _unload_current_backend, set_active_backend # Import unload function
 
 # --- Core Application Setup ---
 print("Creating FastAPI app instance...")
@@ -192,18 +192,19 @@ async def startup_event():
         env_token = settings.HUGGING_FACE_HUB_TOKEN
         if env_token:
             print("--> Found Hugging Face token via environment variable/'.env'.")
-            # Optional: Add verification using the env token if needed
-            # from huggingface_hub import HfApi
-            # try:
-            #     api = HfApi(token=env_token)
-            #     user_info = api.whoami()
-            #     print(f"--> Token verified for user: {user_info.get('name')}")
-            #     auth_ok = True
-            #     source = "Environment Variable"
-            # except Exception as auth_err:
-            #      print(f"--> WARNING: Token found via env var but failed verification: {auth_err}")
-            #      # Decide if verification failure is critical
-            # Let's assume token presence is enough for now
+            
+            try:
+                # Attempt login using the environment token
+                # write_permission maybe needed depending on use case
+                login(token=env_token, add_to_git_credential=False)
+                print("--> Programmatic login successful using environment token.")
+                auth_ok = True
+                source = "Environment Variable (Programmatic Login)"
+                login_attempted = True
+            except Exception as login_err:
+                print(f"--> WARNING: Programmatic login with env token failed: {login_err}")
+                # Decide: fallback to checking file token or fail? Let's fallback for now.
+
             auth_ok = True
             source = "Environment Variable / .env"
 
@@ -213,7 +214,19 @@ async def startup_event():
             file_token = get_token() # Checks ~/.cache/huggingface/token
             if file_token:
                 print("--> Found Hugging Face token via cached login file ('huggingface-cli login').")
-                # Verification can be done implicitly when libraries use it
+                
+                try:
+                    # Attempt login using the environment token
+                    # write_permission maybe needed depending on use case
+                    login(token=file_token, add_to_git_credential=False)
+                    print("--> Programmatic login successful using environment token.")
+                    auth_ok = True
+                    source = "Cached Variable (Programmatic Login)"
+                    login_attempted = True
+                except Exception as login_err:
+                    print(f"--> WARNING: Cached login with env token failed: {login_err}")
+                    # Decide: fallback to checking file token or fail? Let's fallback for now.
+
                 auth_ok = True
                 source = "Cached Login File"
 
@@ -253,6 +266,35 @@ async def startup_event():
         print("--> Embedding model loading initiated.")
     except Exception as e:
         print(f"--> ERROR: Failed to pre-load embedding model: {e}")
+
+    # --- 4. Load Default LLM Model ---
+    print(f"--> Attempting to load default LLM backend/model on startup...")
+    print(f"    Backend Type: {settings.LLM_BACKEND_TYPE}")
+    print(f"    Model: {settings.DEFAULT_MODEL_NAME_OR_PATH}")
+    try:
+        # Call the service function to set the default backend and model
+        # Use settings for default values, request overrides are None here
+        await set_active_backend(
+            backend_type=settings.LLM_BACKEND_TYPE,
+            model_name_or_path=settings.DEFAULT_MODEL_NAME_OR_PATH,
+            device=settings.LLM_DEVICE, # Pass configured default device (relevant for local)
+            quantization=settings.DEFAULT_LLM_QUANTIZATION # Pass default quant (relevant for local)
+        )
+        # Note: For 'local' backend, this schedules the load. Status check is needed later.
+        # For API backends, this configures it and sets status to READY if successful.
+        print(f"--> Default LLM backend ({settings.LLM_BACKEND_TYPE}) setup initiated/scheduled.")
+        # You could add a short sleep and status check here if you MUST wait for local load
+        # await asyncio.sleep(1) # Example wait
+        # status = get_llm_status()
+        # print(f"--> Post-initiation LLM status: {status.get('status')}")
+
+    except ValueError as ve: # Catch config errors from set_active_backend
+        print(f"--> ERROR: Configuration error loading default LLM: {ve}")
+        print("    Server will start, but no LLM will be active initially.")
+    except Exception as e:
+        print(f"--> ERROR: Unexpected error loading default LLM during startup: {e}", exc_info=True)
+        print("    Server will start, but no LLM will be active initially.")
+
     print("--> Event: startup complete.")
 
 @app.on_event("shutdown")
@@ -267,7 +309,7 @@ async def shutdown_event():
     except Exception as e:
          print(f"--> WARNING: Error during NVML shutdown: {e}")
 
-    # --- ADDED: Unload active LLM backend ---
+    # --- Unload active LLM backend ---
     print("--> Unloading active LLM backend...")
     try:
         # Use the dedicated unload function from llm_service
@@ -275,7 +317,6 @@ async def shutdown_event():
         print("--> LLM backend unloaded.")
     except Exception as e:
         print(f"--> WARNING: Error during LLM backend unload: {e}")
-    # --- END ADDED ---
 
     print("--> Event: shutdown complete.")
 
