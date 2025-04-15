@@ -20,7 +20,7 @@ def get_default_device():
 
 class Settings(BaseSettings):
     # --- General Settings ---
-    APP_NAME: str = "RAG LLM Server"
+    APP_NAME: str = "Gestalt RAG LLM Server"
     BASE_DIR: Path = BASE_DIR
 
     # --- Database Settings ---
@@ -65,9 +65,9 @@ class Settings(BaseSettings):
     )
 
     # --- LLM Settings ---
-    LLM_BACKEND_TYPE: Literal["local", "ollama", "vllm", "instructlab"] = Field(
+    LLM_BACKEND_TYPE: Literal["local", "ollama", "vllm", "instructlab", "gemini"] = Field(
         default="local",
-        description="The default LLM backend to use if not specified in the /load request ('local', 'ollama', 'vllm', 'instructlab')."
+        description="The default LLM backend to use if not specified in the /load request ('local', 'ollama', 'vllm', 'instructlab', 'gemini')."
     )
     # Base URLs for API backends (only needed if corresponding type is selected)
     OLLAMA_BASE_URL: Optional[str] = Field(
@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     HUGGING_FACE_HUB_TOKEN: Optional[str] = Field(
         default=None,
         description="Optional Hugging Face Hub token. If set, overrides login via CLI. Loaded from .env or environment variable."
+    )
+
+    GOOGLE_API_KEY: Optional[str] = Field(
+        default=None,
+        description="API Key for Google AI (Gemini). Loaded from .env or environment."
     )
 
     # Directory to scan for locally stored models (e.g., downloaded via snapshot_download)
@@ -129,7 +134,7 @@ class Settings(BaseSettings):
         "text/markdown",
         "text/html",
     ])
-
+ 
     # --- Pydantic settings configuration ---
     class Config:
         env_file = '.env'
