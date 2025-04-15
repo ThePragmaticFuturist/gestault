@@ -1,5 +1,7 @@
 # Step 13: Long Term Memory #
 
+## Note - this file is out of sync with the src code due to some bugs I discovered and have now fixed ##
+
 Storing and retrieving chat history as RAG documents to provide long-term memory for sessions is a powerful and logical extension. It turns the conversation itself into a searchable knowledge base specific to that interaction thread.
 
 Here's how we can integrate this:
