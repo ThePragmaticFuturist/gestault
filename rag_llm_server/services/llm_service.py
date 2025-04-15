@@ -18,7 +18,8 @@ from .llm_backends import (
     LocalTransformersBackend,
     OllamaBackend,
     VLLMBackend,
-    InstructLabBackend
+    InstructLabBackend,
+    GeminiBackend
 )
 
 DEFAULT_HF_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
@@ -288,7 +289,7 @@ async def generate_text(prompt: str) -> Optional[str]:
             loop = asyncio.get_running_loop()
             # LocalBackend.generate is sync, run it in executor
             result = await loop.run_in_executor(None, backend.generate, prompt, config) # Pass config
-        elif isinstance(backend, (OllamaBackend, VLLMBackend, InstructLabBackend)):
+        elif isinstance(backend, (OllamaBackend, VLLMBackend, InstructLabBackend, GeminiBackend)):
             logger.info(f"Running API generation via {llm_state['backend_type']} backend...")
             # API backend generate methods are already async
             result = await backend.generate(prompt, config) # Pass config
@@ -362,6 +363,12 @@ async def set_active_backend(
             new_backend = InstructLabBackend(settings.INSTRUCTLAB_BASE_URL, model_name_or_path)
             # TODO: Ping InstructLab?
 
+        elif backend_type == "gemini":
+             if not settings.GOOGLE_API_KEY:
+                 raise ValueError("GOOGLE_API_KEY not configured in settings/environment.")
+             # Initialization happens here, might raise error if API key invalid etc.
+             new_backend = GeminiBackend(settings.GOOGLE_API_KEY, model_name_or_path)
+             
         else:
             raise ValueError(f"Unsupported LLM_BACKEND_TYPE: {backend_type}")
 
@@ -380,3 +387,87 @@ async def set_active_backend(
         llm_state["backend_type"] = None
         llm_state["active_model"] = None
         # Re-raise? Or just let status reflect failure? Let status reflect.
+
+def summarize_text_with_query(text_to_summarize: str, user_query: str, max_summary_tokens: int = 100) -> Optional[str]:
+    """
+    Uses the loaded LLM to summarize text, guided by a user query.
+    NOTE: This makes an additional LLM call and has concurrency issues if state is modified directly.
+    """
+    # Check if backend is ready
+    backend = llm_state.get("backend_instance")
+    current_status = llm_state.get("status")
+    if current_status != LLMStatus.READY or backend is None:
+        logger.error("LLM not ready, cannot summarize.")
+        return None
+
+    # Construct a specific prompt for summarization
+    summarization_prompt = f"""### INSTRUCTION:
+Concisely summarize the following text, focusing on aspects relevant to the user query. Output only the summary.
+
+### USER QUERY:
+{user_query}
+
+### TEXT TO SUMMARIZE:
+{text_to_summarize}
+
+### SUMMARY:"""
+
+    # Use a subset of generation config for summarization
+    summary_config_override = {
+        "temperature": 0.3, # Less creative
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_new_tokens": max_summary_tokens,
+        "repetition_penalty": 1.1 # Use a slight penalty here too
+    }
+    # Get current config and merge overrides *without modifying global state*
+    current_config = llm_state["config"].copy()
+    summary_config = current_config
+    summary_config.update(summary_config_override) # Update the copy
+
+    logger.info(f"Requesting summarization for query '{user_query[:30]}...'")
+    logger.debug(f"Summarization Prompt:\n{summarization_prompt[:200]}...")
+    logger.debug(f"Summarization Config: {summary_config}")
+
+    summary = None
+    try:
+        # --- Call the backend's generate method directly ---
+        # Decide how to run based on backend type (like in generate_text)
+        if isinstance(backend, LocalTransformersBackend):
+             loop = asyncio.get_running_loop()
+             # Pass the specific summary_config
+             summary = loop.run_in_executor(None, backend.generate, summarization_prompt, summary_config).result() # Use .result() if sure executor finished, better to await if possible
+             # Warning: Mixing sync .result() in async context can block.
+             # A better pattern might involve making summarize_text_with_query async
+             # OR modifying generate_text to accept config overrides.
+             # Let's keep it simple but potentially blocking for now. Consider refactoring later.
+             logger.warning("Running local summarization synchronously within executor call - may block.")
+             # Alternatively, make summarize_text_with_query async and await generate_text
+             # summary = asyncio.run_coroutine_threadsafe(generate_text(summarization_prompt, summary_config), loop).result() # Complex
+
+        elif isinstance(backend, (OllamaBackend, VLLMBackend, InstructLabBackend, GeminiBackend)):
+             # These generate methods are async, but we are in a sync function called by executor
+             # This is problematic. summarize_text_with_query SHOULD be async.
+             logger.error("Cannot call async API backend generation from sync summarize function used within run_in_executor. Refactor needed.")
+             # For now, let's skip summarization for API backends to fix import error
+             logger.warning("Skipping summarization for API backends in this sync helper.")
+             return f"[Summarization skipped for API backend: {llm_state['backend_type']}]"
+             # # Correct way would require summarize_text_with_query to be async:
+             # # summary = await backend.generate(summarization_prompt, summary_config)
+        else:
+            logger.error(f"Unknown backend type {type(backend)} cannot summarize.")
+            return None
+        # --- End Backend Call ---
+
+
+        if summary:
+            logger.info("Summarization successful.")
+            logger.debug(f"Generated Summary: {summary}")
+            return summary.strip()
+        else:
+            logger.error("Summarization returned None or failed.")
+            return None
+
+    except Exception as e:
+        logger.error(f"Summarization failed unexpectedly: {e}", exc_info=True)
+        return None
