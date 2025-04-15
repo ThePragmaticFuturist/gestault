@@ -1,0 +1,6 @@
+/* src/components/MessageList/MessageList.module.css */
+.messageList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px; /* Space between messages */
+}

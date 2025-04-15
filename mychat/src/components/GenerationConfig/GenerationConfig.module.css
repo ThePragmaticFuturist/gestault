@@ -1,0 +1,67 @@
+/* src/components/GenerationConfig/GenerationConfig.module.css */
+.genConfig {
+  padding: 10px 15px;
+  background-color: #f0f4f8; /* Match Session Manager */
+  border-top: 1px solid #c9d7ea; /* Separator */
+  flex-shrink: 0;
+}
+
+.genConfig h4 {
+  margin-top: 0;
+  margin-bottom: 12px;
+  color: #1c5fb0;
+  font-size: 1em;
+}
+
+.paramsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); /* Responsive grid */
+  gap: 15px;
+}
+
+.paramControl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.paramControl label {
+  font-size: 0.85em;
+  color: #57606a;
+  font-weight: 500;
+}
+
+.paramControl input[type="range"] {
+  cursor: pointer;
+  width: 100%; /* Take full width of grid cell */
+}
+
+.paramControl input[type="number"] {
+  padding: 6px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  font-size: 0.9em;
+  max-width: 100px; /* Prevent number inputs becoming too wide */
+}
+
+.paramControl input:disabled {
+    background-color: #f6f8fa;
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+.feedbackArea {
+    margin-top: 10px;
+    min-height: 1.2em; /* Reserve space for messages */
+    font-size: 0.85em;
+}
+
+.updateMessage {
+    color: #0969da; /* Blue */
+    font-style: italic;
+}
+
+.errorText {
+    color: #cf222e; /* Red */
+    font-weight: bold;
+}

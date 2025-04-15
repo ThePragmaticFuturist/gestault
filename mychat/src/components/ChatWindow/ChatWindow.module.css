@@ -1,0 +1,9 @@
+/* src/components/ChatWindow/ChatWindow.module.css */
+.chatWindow {
+  flex-grow: 1; /* Take up remaining vertical space */
+  overflow-y: auto; /* Enable vertical scrolling */
+  padding: 15px;
+  background-color: #ffffff;
+  display: flex; /* Needed for flex-grow */
+  flex-direction: column; /* Stack messages vertically */
+}

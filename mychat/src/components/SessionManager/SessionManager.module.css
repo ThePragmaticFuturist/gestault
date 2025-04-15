@@ -1,0 +1,120 @@
+/* src/components/SessionManager/SessionManager.module.css */
+.sessionManager {
+  background-color: #e8f0fe; /* Lighter blue background */
+  padding: 10px 15px;
+  border-bottom: 1px solid #c9d7ea;
+  display: flex;
+  flex-direction: column;
+  max-height: 35vh; /* Limit height */
+  overflow: hidden; /* Hide overflow initially, list scrolls */
+  flex-shrink: 0;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.controls button {
+  padding: 6px 12px;
+  border: 1px solid #a0b3cd;
+  background-color: #ffffff;
+  color: #1c5fb0;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.controls button:hover {
+  background-color: #f0f4f8;
+  border-color: #1c5fb0;
+}
+
+.controls button:disabled {
+  background-color: #e8f0fe;
+  color: #a0b3cd;
+  border-color: #d8e2f1;
+  cursor: not-allowed;
+}
+
+.sessionListContainer {
+    flex-grow: 1; /* Allow list to take remaining space */
+    overflow-y: auto; /* Enable scrolling for the list */
+    min-height: 0; /* Necessary for scrolling in flex column */
+}
+
+.sessionListContainer h4 {
+  margin-top: 0;
+  margin-bottom: 8px;
+  color: #1c5fb0;
+  font-size: 1em;
+  border-bottom: 1px solid #c9d7ea;
+  padding-bottom: 4px;
+}
+
+.sessionList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.sessionItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 4px;
+  border-bottom: 1px dashed #d8e2f1;
+  cursor: pointer;
+}
+.sessionItem:last-child {
+    border-bottom: none;
+}
+
+.sessionItem:hover {
+    background-color: #d8e2f1;
+    border-radius: 3px;
+}
+
+.sessionItem.active {
+    background-color: #c9d7ea;
+    font-weight: bold;
+    border-radius: 3px;
+}
+
+.sessionName {
+  flex-grow: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 10px;
+  font-size: 0.9em;
+}
+
+.deleteButton {
+  background: none;
+  border: none;
+  color: #cf222e;
+  font-size: 1.2em;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 5px;
+  flex-shrink: 0;
+}
+
+.deleteButton:hover {
+  color: #a3131e;
+}
+
+.deleteButton:disabled {
+    color: #ccc;
+    cursor: not-allowed;
+}
+
+.noSessions {
+    font-style: italic;
+    color: #57606a;
+    font-size: 0.9em;
+}
