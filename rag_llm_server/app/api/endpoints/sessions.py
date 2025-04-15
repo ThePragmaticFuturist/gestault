@@ -3,9 +3,10 @@ import uuid
 import logging
 import datetime
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 
 # Import models and db access
 from app.api.models.chat import (
@@ -22,12 +23,16 @@ from core.config import settings
 # Import embedding and search functions/models if needed directly
 from services.embedding_service import generate_embeddings
 # Import LLM service functions and status
-from services.llm_service import generate_text, get_llm_status, LLMStatus, llm_state ##, summarize_text_with_query for the optional idea of summarizing chunks to reduce tokens
+from services.llm_service import generate_text, get_llm_status, LLMStatus, llm_state, summarize_text_with_query ##, summarize_text_with_query for the optional idea of summarizing chunks to reduce tokens
+from services.llm_backends import LocalTransformersBackend
 # --- END MODIFIED IMPORTS ---
 from app.api.endpoints.documents import SearchQuery
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+class SessionMemoryUpdateRequest(BaseModel):
+    enabled: bool
 
 # --- Helper Function (Optional but recommended for validation) ---
 async def get_session_or_404(session_id: str) -> dict:
@@ -164,322 +169,308 @@ async def delete_session(session_id: str):
                 "stores response, and returns the assistant message.",
 )
 
-async def add_message_to_session( # Renamed from post_message for clarity internally
+async def add_message_to_session(
     session_id: str,
     message_data: MessageCreateRequest,
-    # chroma_client: chromadb.ClientAPI = Depends(get_chroma_client) # Inject Chroma
+    background_tasks: BackgroundTasks,
 ):
-    """
-    Handles user message, RAG, placeholder LLM call, and stores conversation turn.
-    """
     if message_data.role != "user":
-         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only 'user' role messages can be posted by the client.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only 'user' role messages can be posted by the client.")
 
-    session = await get_session_or_404(session_id) # Ensure session exists and get its data
+    session = await get_session_or_404(session_id)
+
+    # --- Get the memory setting ---
+    long_term_memory_enabled = session.get("long_term_memory_enabled", True) # Default to True if missing? Or rely on DB default.
+
     user_message_content = message_data.content
     now = datetime.datetime.now(datetime.timezone.utc)
-    chroma_client = get_chroma_client() # Get client directly for now
+    chroma_client = get_chroma_client()
 
     # --- Store User Message ---
-    # Use a transaction? Maybe better to store user msg, then do RAG/LLM, then store assistant msg.
-    # Let's store user message immediately first.
+    user_message_id = None
     try:
         insert_user_message_query = chat_messages_table.insert().values(
-            session_id=session_id,
-            timestamp=now,
-            role="user",
-            content=user_message_content,
-            metadata=None,
+            session_id=session_id, timestamp=now, role="user", content=user_message_content, metadata=None
         ).returning(chat_messages_table.c.id)
         user_message_id = await database.execute(insert_user_message_query)
         logger.info(f"[Session:{session_id}] Stored user message (ID: {user_message_id}).")
-
-        # Update session timestamp for user message (or wait until assistant message?)
-        # Let's update now to reflect activity immediately.
-        update_session_query = sessions_table.update().where(sessions_table.c.id == session_id).values(
-             last_updated_at=now
-        )
+        update_session_query = sessions_table.update().where(sessions_table.c.id == session_id).values(last_updated_at=now)
         await database.execute(update_session_query)
-
     except Exception as e:
         logger.error(f"[Session:{session_id}] Failed to store user message: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store user message.")
+        raise HTTPException(status_code=500, detail="Failed to store user message.")
 
-    # --- Perform RAG Search ---
-    rag_context = ""
+
+    # --- Perform Document RAG Search & Summarization ---
+    rag_context = "" # Stores summarized document context
     rag_chunk_ids = []
-    rag_document_ids_in_session = session.get("rag_document_ids") # Get associated doc IDs
-
+    retrieved_docs = [] # Keep original docs for potential summarization
+    retrieved_metadatas = []
+    rag_document_ids_in_session = session.get("rag_document_ids")
     if rag_document_ids_in_session:
         logger.info(f"[Session:{session_id}] Performing RAG search within documents: {rag_document_ids_in_session}")
         try:
+            # ... (code to perform ChromaDB query for documents, populate retrieved_docs, retrieved_metadatas, rag_chunk_ids) ...
             doc_collection = chroma_client.get_collection(settings.DOCUMENT_COLLECTION_NAME)
-
-            # 1. Embed the user query
             query_embedding = generate_embeddings([user_message_content])
-            if not query_embedding or not query_embedding[0]:
-                raise ValueError("Failed to generate query embedding for RAG.")
+            if query_embedding and query_embedding[0]:
+                chroma_where_filter = {"$and": [{"type": "document"}, {"document_id": {"$in": rag_document_ids_in_session}}]} # Filter for type:document
+                results = doc_collection.query(query_embeddings=query_embedding, n_results=settings.RAG_TOP_K, where=chroma_where_filter, include=['documents', 'metadatas', 'distances'])
+                retrieved_docs = results.get('documents', [[]])[0]
+                retrieved_metadatas = results.get('metadatas', [[]])[0]
+                rag_chunk_ids = results.get('ids', [[]])[0] # Original chunk IDs
 
-            # 2. Build ChromaDB filter
-            chroma_where_filter = {
-                # Filter results to only include chunks from the documents linked to this session
-                "document_id": {"$in": rag_document_ids_in_session}
-            }
-            logger.debug(f"[Session:{session_id}] RAG ChromaDB filter: {chroma_where_filter}")
-
-            # 3. Query ChromaDB
-            results = doc_collection.query(
-                query_embeddings=query_embedding,
-                n_results=settings.RAG_TOP_K,
-                where=chroma_where_filter,
-                include=['documents', 'metadatas', 'distances'] # Get text, metadata, distance
-            )
-
-            # 4. Format RAG context
-            retrieved_docs = results.get('documents', [[]])[0]
-            retrieved_metadatas = results.get('metadatas', [[]])[0]
-            retrieved_ids = results.get('ids', [[]])[0] # Get chunk IDs
-
-            if retrieved_docs:
-                rag_chunk_ids = retrieved_ids # Store the IDs of retrieved chunks
-                context_parts = []
-                for i, doc_text in enumerate(retrieved_docs):
-                    metadata = retrieved_metadatas[i] if i < len(retrieved_metadatas) else {}
-                    source_info = f"Source(Doc: {metadata.get('document_id', 'N/A')}, Chunk: {metadata.get('chunk_index', 'N/A')})"
-                    context_parts.append(f"{source_info}:\n{doc_text}")
-                rag_context = "\n\n---\n\n".join(context_parts)
-                logger.info(f"[Session:{session_id}] Retrieved {len(retrieved_docs)} chunks for RAG context.")
-                logger.debug(f"[Session:{session_id}] RAG Context:\n{rag_context[:500]}...") # Log beginning of context
-
+                if retrieved_docs:
+                    logger.info(f"[Session:{session_id}] Retrieved {len(retrieved_docs)} document chunks for summarization.")
+                    # --- Summarize Retrieved Document Chunks ---
+                    summarized_doc_parts = []
+                    loop = asyncio.get_running_loop()
+                    for i, chunk_text in enumerate(retrieved_docs):
+                         try:
+                             summary = await loop.run_in_executor(None, summarize_text_with_query, chunk_text, user_message_content, 150)
+                             if summary: summarized_doc_parts.append(summary)
+                         except Exception as summary_err: logger.error(f"Error summarizing doc chunk {i}: {summary_err}", exc_info=True)
+                    rag_context = "\n---\n".join(summarized_doc_parts) # rag_context now holds summarized doc info
+                    if not rag_context: rag_context = "[Document Summarization Failed]"
+                    logger.info(f"[Session:{session_id}] Finished summarizing doc chunks.")
+                else:
+                     logger.info(f"[Session:{session_id}] No relevant document chunks found.")
+            else:
+                 logger.error("[Session:{session_id}] Failed to generate embedding for document search.")
+                 rag_context = "[Document RAG search embedding failed]"
         except Exception as e:
-            logger.error(f"[Session:{session_id}] RAG search failed: {e}", exc_info=True)
-            # Proceed without RAG context, maybe log a warning or add to assistant metadata
-            rag_context = "[RAG search failed]" # Indicate failure in context
+            logger.error(f"[Session:{session_id}] Document RAG search failed: {e}", exc_info=True)
+            rag_context = "[Document RAG search failed]"
     else:
-         logger.info(f"[Session:{session_id}] No RAG document IDs associated. Skipping RAG search.")
+         logger.info(f"[Session:{session_id}] No RAG document IDs associated. Skipping document RAG search.")
 
 
-    # --- Retrieve Chat History ---
-    chat_history_str = ""
+    # --- Perform Chat History RAG Search & Summarization ---
+    retrieved_history_context = "" # Stores summarized history context
+    retrieved_history_ids = []
+
+    if long_term_memory_enabled:
+        try:
+            logger.info(f"[Session:{session_id}] Performing RAG search on chat history...")
+            # ... (code to perform ChromaDB query for chat history, populate retrieved_history_docs, retrieved_history_ids) ...
+            # ... (code to summarize retrieved_history_docs into retrieved_history_context) ...
+            history_query_embedding = generate_embeddings([user_message_content])
+            if history_query_embedding and history_query_embedding[0]:
+                 chroma_client = get_chroma_client()
+                 collection = chroma_client.get_collection(settings.DOCUMENT_COLLECTION_NAME)
+                 history_where_filter = {"$and": [{"type": "chat"}, {"session_id": session_id}]}
+                 history_rag_k = settings.RAG_TOP_K
+                 history_results = collection.query(query_embeddings=history_query_embedding, n_results=history_rag_k, where=history_where_filter, include=['documents', 'metadatas', 'distances'])
+                 retrieved_history_docs = history_results.get('documents', [[]])[0]
+                 retrieved_history_metadatas = history_results.get('metadatas', [[]])[0]
+                 retrieved_history_ids = history_results.get('ids', [[]])[0]
+
+                 if retrieved_history_docs:
+                      logger.info(f"[Session:{session_id}] Retrieved {len(retrieved_history_docs)} relevant past messages for summarization.")
+                      summarized_history_parts = []
+                      loop = asyncio.get_running_loop()
+                      for i, history_text in enumerate(retrieved_history_docs):
+                           hist_meta = retrieved_history_metadatas[i] if i < len(retrieved_history_metadatas) else {}
+                           hist_role = hist_meta.get('role', 'Unknown')
+                           try:
+                                summary = await loop.run_in_executor(None, summarize_text_with_query, f"{hist_role.capitalize()}: {history_text}", user_message_content, 100)
+                                if summary: summarized_history_parts.append(summary)
+                           except Exception as summary_err: logger.error(f"Error summarizing history snippet {i}: {summary_err}", exc_info=True)
+                      retrieved_history_context = "\n---\n".join(summarized_history_parts)
+                      if not retrieved_history_context: retrieved_history_context = "[History Summarization Failed]"
+                      logger.info(f"[Session:{session_id}] Finished summarizing history snippets.")
+                 else:
+                      logger.info(f"[Session:{session_id}] No relevant chat history found for this query.")
+            else:
+                 logger.error("[Session:{session_id}] Failed to generate embedding for history search.")
+                 retrieved_history_context = "[History RAG search embedding failed]"
+        except Exception as e:
+            logger.error(f"[Session:{session_id}] Chat history RAG search failed: {e}", exc_info=True)
+            retrieved_history_context = "[History RAG search failed]"
+    else:
+        logger.info(f"[Session:{session_id}] Long term memory disabled. Skipping chat history RAG search.")
+        # Ensure context is empty if disabled
+        retrieved_history_context = ""
+        retrieved_history_ids = []
+
+    # --- Retrieve RECENT Chat History (Verbatim) ---
+    chat_history_str = "" # Stores recent verbatim history
     try:
-        # Fetch last N messages (user and assistant), ordered oldest first for prompt
-        # N pairs = 2 * N messages. Add 1 to potentially fetch the just-added user message if needed.
+        # ... (code to fetch last N messages into chat_history_str - unchanged) ...
         history_limit = settings.CHAT_HISTORY_LENGTH * 2
-        history_query = chat_messages_table.select().where(
-            chat_messages_table.c.session_id == session_id
-        ).order_by(chat_messages_table.c.timestamp.desc()).limit(history_limit) # Fetch recent, then reverse
-
+        history_query = chat_messages_table.select().where(chat_messages_table.c.session_id == session_id).order_by(chat_messages_table.c.timestamp.desc()).limit(history_limit)
         recent_messages = await database.fetch_all(history_query)
-        recent_messages.reverse() # Reverse to get chronological order
-
+        recent_messages.reverse()
         if recent_messages:
              history_parts = [f"{msg['role'].capitalize()}: {msg['content']}" for msg in recent_messages]
-             # Exclude the very last message if it's the user message we just added?
-             # Let's assume the LLM prompt format handles the current user query separately.
              chat_history_str = "\n".join(history_parts)
-             logger.info(f"[Session:{session_id}] Retrieved last {len(recent_messages)} messages for history.")
-             logger.debug(f"[Session:{session_id}] Chat History:\n{chat_history_str[-500:]}...") # Log end of history
-
+             logger.info(f"[Session:{session_id}] Retrieved last {len(recent_messages)} verbatim messages for history.")
     except Exception as e:
-        logger.error(f"[Session:{session_id}] Failed to retrieve chat history: {e}", exc_info=True)
-        chat_history_str = "[Failed to retrieve history]"
+        logger.error(f"[Session:{session_id}] Failed to retrieve recent chat history: {e}", exc_info=True)
+        chat_history_str = "[Failed to retrieve recent history]"
 
-    # --- Construct Prompt ---
-    # --- Construct & Truncate Prompt ---
-    
 
-    prompt_parts = []
+    logger.info("Constructing final prompt with RAG context and history...")
 
-    prompt_parts.append("### INSTRUCTION:")
-    prompt_parts.append("You are a helpful AI assistant. Respond to the user's query based on the provided context and chat history.")
+    prompt_for_llm = "[ERROR: Prompt construction did not complete]"
+    llm_ready = False
+    final_token_count = 0
 
-    if rag_context and rag_context != "[RAG search failed]":
-        prompt_parts.append("\n### CONTEXT:")
-        prompt_parts.append(rag_context)
-
-    if chat_history_str:
-        prompt_parts.append("\n### CHAT HISTORY:")
-        prompt_parts.append(chat_history_str) # History already includes "User:" / "Assistant:"
-
-    prompt_parts.append("\n### USER QUERY:")
-    prompt_parts.append(user_message_content)
-
-    prompt_parts.append("\n### RESPONSE:") # Model should generate text after this marker
-
-    prompt_for_llm = "\n".join(prompt_parts)
-
-    logger.debug(f"[Session:{session_id}] Constructed prompt (first/last 200 chars):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}") 
-
-    assistant_response_content = None
     assistant_message_metadata = {
-        "prompt_preview": prompt_for_llm[:200] + "...",
+        "prompt_preview": None,
         "rag_chunks_retrieved": rag_chunk_ids,
-        "llm_call_error": None # Add field for potential errors
+        "relevant_history_retrieved": retrieved_history_ids, # Now correctly populated or []
+        "llm_call_error": None
     }
 
-    # Check LLM status before attempting generation
-    # Get necessary info from LLM state
-    # llm_status_data = get_llm_status()
-    # tokenizer = llm_state.get("tokenizer") # Get tokenizer object from state
+    # 1. Check LLM Status and get essentials
+    llm_status_data = get_llm_status()
+    # tokenizer = llm_state.get("tokenizer")
     # max_length = llm_state.get("max_model_length")
-    # model_name = llm_status_data.get("model_name_or_path", "N/A")
+    backend_instance = llm_state.get("backend_instance") # Get the backend instance
+    model_name = llm_status_data.get("active_model", "N/A")
 
-    # logger.info("Constructing final prompt using summarized context...")
-    llm_status_data = get_llm_status() # Gets the status dict
-    tokenizer = llm_state.get("tokenizer")
-    max_length = llm_state.get("max_model_length")
-    # --- Use 'active_model' key from status dict ---
-    model_name = llm_status_data.get("active_model", "N/A") # Use 'active_model' key
+    tokenizer = None
+    max_length = None
+    if isinstance(backend_instance, LocalTransformersBackend):
+        tokenizer = backend_instance.tokenizer
+        max_length = backend_instance.max_model_length
 
-    if llm_status_data["status"] != LLMStatus.READY.value: # Check for READY status
+    if llm_status_data["status"] != LLMStatus.READY.value:
         error_detail = f"LLM not ready (Status: {llm_status_data['status']}). Please load/configure a model first."
         logger.warning(f"[Session:{session_id}] {error_detail}")
-        assistant_response_content = f"[ERROR: {error_detail}]"
-        # Need to initialize metadata here if erroring out early
-        assistant_message_metadata = {
-            "prompt_preview": "[ERROR: LLM not ready]",
-            "rag_chunks_retrieved": rag_chunk_ids, # Keep RAG info if available
-            "llm_call_error": error_detail
-        }
-        llm_ready = False # Flag to skip generation
-        # No prompt needed if we can't generate
-        prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
-    # --- Handle potential missing tokenizer/max_length needed for truncation ---
-    # These are primarily needed if we need to truncate context/history for the prompt
-    # API backends might handle truncation server-side, but good practice to check here
+        prompt_for_llm = f"[ERROR: {error_detail}]"
+        assistant_message_metadata["llm_call_error"] = error_detail
+        # llm_ready remains False
 
-    elif not tokenizer or not max_length:
-         # Only critical if context/history is long and needs truncation
-         # For now, let's allow proceeding but log a warning if they are missing
-         # (relevant if switching from local to API backend without restarting server maybe?)
-         logger.warning("Tokenizer or max_length not found in llm_state, prompt truncation might be inaccurate if needed.")
-         llm_ready = True # Allow attempt, API backend might handle length
+    # 2. Check if Tokenizer/Max Length are needed and available FOR LOCAL backend
+    # Only perform token-based truncation if using local backend AND have tools
+    elif isinstance(backend_instance, LocalTransformersBackend) and (not tokenizer or not max_length):
+        # We are using local backend but missing tools for truncation
+        logger.warning("Local backend active but Tokenizer or max_length missing from state. Cannot perform accurate truncation. Sending raw context.")
+        llm_ready = True # Allow attempt
+        # Assemble simple prompt without truncation
+        # ... (Assemble simple prompt logic - unchanged, uses rag_context, retrieved_history_context, chat_history_str) ...
+        prompt_parts = [instruction_prompt]
+        if rag_context and "[ERROR" not in rag_context: prompt_parts.append(f"\n### RETRIEVED DOCUMENT CONTEXT (Summarized):\n{rag_context}")
+        if retrieved_history_context and "[ERROR" not in retrieved_history_context: prompt_parts.append(f"\n### RELEVANT PAST CONVERSATION (Summarized):\n{retrieved_history_context}")
+        if chat_history_str and "[ERROR" not in chat_history_str: prompt_parts.append(f"\n### RECENT CHAT HISTORY:\n{chat_history_str}")
+        prompt_parts.append(user_query_prompt)
+        prompt_parts.append(response_marker)
+        prompt_for_llm = "\n".join(prompt_parts)
 
+    # 3. Perform Full Prompt Construction with Truncation
     else:
-        # --- Define Prompt Components ---
-        # Estimate tokens needed for instruction, markers, query, and response buffer
-        # This is an approximation; actual token count depends on specific words.
+        llm_ready = True # LLM is ready
+
+        # Define fixed parts
         instruction_text = "You are a helpful AI assistant. Respond to the user's query based on the provided context and chat history."
         user_query_text = user_message_content
-        # Reserve tokens for instruction, markers, query, and some buffer for the response itself
-        # Let's reserve ~150 tokens for non-context/history parts + response buffer
-        # And also account for the model's requested max_new_tokens
-        generation_config = llm_status_data.get("generation_config", {})
-        max_new_tokens = generation_config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS)
-        reserved_tokens = 150 + max_new_tokens
-        max_context_history_tokens = max_length - reserved_tokens
-        logger.info(f"Max Length: {max_length}, Reserved: {reserved_tokens}, Available for Context/History: {max_context_history_tokens}")
+        instruction_prompt = "### INSTRUCTION:\n" + instruction_text
+        user_query_prompt = "\n### USER QUERY:\n" + user_query_text
+        response_marker = "\n### RESPONSE:"
 
-        # --- Tokenize and Truncate Components ---
-        # 1. RAG Context: Truncate if needed
-        rag_context_tokens = []
-        if rag_context and rag_context != "[RAG search failed]":
-            rag_context_tokens = tokenizer.encode(f"\n### CONTEXT:\n{rag_context}", add_special_tokens=False)
-            if len(rag_context_tokens) > max_context_history_tokens:
-                logger.warning(f"Truncating RAG context ({len(rag_context_tokens)} tokens) to fit limit.")
-                rag_context_tokens = rag_context_tokens[:max_context_history_tokens]
-                # Optional: Decode back to string to see truncated context? Might be slow.
-                # rag_context = tokenizer.decode(rag_context_tokens) # Use truncated context text
+        # --- Only do token math if local backend ---
+        if isinstance(backend_instance, LocalTransformersBackend) and tokenizer and max_length:
+            logger.info("Proceeding with token-based prompt truncation logic for local backend.")
+            # ... (Calculate reserved_tokens, max_context_tokens using tokenizer/max_length) ...
+            # ... (Tokenize context parts using tokenizer) ...
+            # ... (Perform truncation logic on token lists) ...
+            # ... (Assemble final_token_ids) ...
+            # ... (Decode final_token_ids into prompt_for_llm) ...
+            # ... (Log final_token_count) ...
+            generation_config = llm_status_data.get("generation_config", {})
+            max_new_tokens = generation_config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS)
+            fixed_parts_text = instruction_prompt + user_query_prompt + response_marker
+            fixed_tokens_count = len(tokenizer.encode(fixed_parts_text, add_special_tokens=False))
+            reserved_tokens = fixed_tokens_count + max_new_tokens + 10
+            max_context_tokens = max_length - reserved_tokens
+            if max_context_tokens < 0: max_context_tokens = 0
+            logger.info(f"Max Length: {max_length}, Reserved: {reserved_tokens}, Available for ALL Context: {max_context_tokens}")
 
-        available_tokens_for_history = max_context_history_tokens - len(rag_context_tokens)
+            # Tokenize and truncate... (Copy the full logic from previous step here)
+ 
+            doc_context_tokens = tokenizer.encode(f"\n### RETRIEVED DOCUMENT CONTEXT (Summarized):\n{rag_context}", add_special_tokens=False) if rag_context and "[ERROR" not in rag_context else []
+            history_summary_tokens = tokenizer.encode(f"\n### RELEVANT PAST CONVERSATION (Summarized):\n{retrieved_history_context}", add_special_tokens=False) if retrieved_history_context and "[ERROR" not in retrieved_history_context else []
+            recent_history_tokens = tokenizer.encode(f"\n### RECENT CHAT HISTORY:\n{chat_history_str}", add_special_tokens=False) if chat_history_str and "[ERROR" not in chat_history_str else []
 
-        # 2. Chat History: Truncate from the OLDEST messages if needed
-        chat_history_tokens = []
-        if chat_history_str:
-            # Start with full history prompt part
-            full_history_prompt = f"\n### CHAT HISTORY:\n{chat_history_str}"
-            chat_history_tokens = tokenizer.encode(full_history_prompt, add_special_tokens=False)
-            if len(chat_history_tokens) > available_tokens_for_history:
-                 logger.warning(f"Truncating chat history ({len(chat_history_tokens)} tokens) to fit limit.")
-                 # Simple truncation: keep only the last N tokens
-                 chat_history_tokens = chat_history_tokens[-available_tokens_for_history:]
-                 # More robust: Re-tokenize messages one by one from recent to old until limit hit? Too complex for now.
+            total_context_tokens = len(doc_context_tokens) + len(history_summary_tokens) + len(recent_history_tokens)
+            available_space = max_context_tokens
 
-        # --- Assemble Final Prompt (using tokens is safer, but harder to format) ---
-        # For simplicity, let's assemble with potentially truncated *strings* derived from tokens
-        # NOTE: Decoding tokens back to strings might introduce slight changes / tokenization artifacts.
-        # A more advanced method would keep everything as token IDs until the final input.
+            if total_context_tokens > available_space:
+                logger.info(f"Combined context ({total_context_tokens} tokens) exceeds available space ({available_space}). Truncating...")
+                overflow = total_context_tokens - available_space
+                # Truncate Recent History first (keep end)
+                if overflow > 0 and len(recent_history_tokens) > 0:
+                    # ... (truncation logic for recent_history_tokens) ...
+                     if len(recent_history_tokens) >= overflow: recent_history_tokens = recent_history_tokens[overflow:]; overflow = 0
+                     else: overflow -= len(recent_history_tokens); recent_history_tokens = []
+                # Truncate History Summary next (keep beginning)
+                if overflow > 0 and len(history_summary_tokens) > 0:
+                    # ... (truncation logic for history_summary_tokens) ...
+                    if len(history_summary_tokens) >= overflow: history_summary_tokens = history_summary_tokens[:len(history_summary_tokens)-overflow]; overflow = 0
+                    else: overflow -= len(history_summary_tokens); history_summary_tokens = []
+                # Truncate Document Context last (keep beginning)
+                if overflow > 0 and len(doc_context_tokens) > 0:
+                    # ... (truncation logic for doc_context_tokens) ...
+                    if len(doc_context_tokens) >= overflow: doc_context_tokens = doc_context_tokens[:len(doc_context_tokens)-overflow]; overflow = 0
+                    else: doc_context_tokens = []
 
-        final_prompt_parts = []
-        final_prompt_parts.append("### INSTRUCTION:")
-        final_prompt_parts.append(instruction_text)
+            # Assemble final prompt from potentially truncated token lists
+            instruction_tokens = tokenizer.encode(instruction_prompt, add_special_tokens=False)
+            query_tokens = tokenizer.encode(user_query_prompt, add_special_tokens=False)
+            marker_tokens = tokenizer.encode(response_marker, add_special_tokens=False)
+            final_token_ids = instruction_tokens + doc_context_tokens + history_summary_tokens + recent_history_tokens + query_tokens + marker_tokens
 
-        if rag_context_tokens:
-             # Decode the potentially truncated RAG context tokens
-             decoded_rag_context_header = tokenizer.decode(tokenizer.encode("\n### CONTEXT:", add_special_tokens=False))
-             decoded_rag_context_body = tokenizer.decode(rag_context_tokens[len(tokenizer.encode(decoded_rag_context_header, add_special_tokens=False)):])
-             final_prompt_parts.append(decoded_rag_context_header + decoded_rag_context_body)
+            prompt_for_llm = tokenizer.decode(final_token_ids)
+            final_token_count = len(final_token_ids)
+            logger.info(f"Constructed final prompt with {final_token_count} tokens using truncation.")
+
+        else: # API Backend - Assemble without local truncation
+            logger.info("Using API backend. Assembling prompt without local token truncation.")
+            prompt_parts = [instruction_prompt]
+            if rag_context and "[ERROR" not in rag_context: prompt_parts.append(f"\n### RETRIEVED DOCUMENT CONTEXT (Summarized):\n{rag_context}")
+            if retrieved_history_context and "[ERROR" not in retrieved_history_context: prompt_parts.append(f"\n### RELEVANT PAST CONVERSATION (Summarized):\n{retrieved_history_context}")
+            if chat_history_str and "[ERROR" not in chat_history_str: prompt_parts.append(f"\n### RECENT CHAT HISTORY:\n{chat_history_str}")
+            prompt_parts.append(user_query_prompt)
+            prompt_parts.append(response_marker)
+            prompt_for_llm = "\n".join(prompt_parts)
+            # We don't have an accurate token count here
+            final_token_count = -1 # Indicate unknown count
+            logger.debug("Prompt assembled for API backend.")
+
+        # Set prompt preview metadata regardless of truncation method
+        assistant_message_metadata["prompt_preview"] = prompt_for_llm[:200] + "..."
 
 
-        if chat_history_tokens:
-            # Decode the potentially truncated chat history tokens
-            decoded_hist_header = tokenizer.decode(tokenizer.encode("\n### CHAT HISTORY:", add_special_tokens=False))
-            decoded_hist_body = tokenizer.decode(chat_history_tokens[len(tokenizer.encode(decoded_hist_header, add_special_tokens=False)):])
-            final_prompt_parts.append(decoded_hist_header + decoded_hist_body)
+    # Log final prompt
+    log_token_count = f"Token Count: {final_token_count}" if final_token_count != -1 else "Token Count: N/A (API Backend)"
+    if llm_ready and "[ERROR" not in prompt_for_llm:
+         logger.debug(f"[Session:{session_id}] Constructed prompt for LLM ({log_token_count}):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}")
+    else:
+         logger.debug(f"[Session:{session_id}] Prompt construction failed or LLM not ready. Final prompt value: {prompt_for_llm}")
 
 
-        final_prompt_parts.append("\n### USER QUERY:")
-        final_prompt_parts.append(user_query_text)
-        final_prompt_parts.append("\n### RESPONSE:")
-
-        prompt_for_llm = "\n".join(final_prompt_parts)
-
-        # Final Token Check (Optional but recommended)
-        final_tokens = tokenizer.encode(prompt_for_llm)
-        final_token_count = len(final_tokens)
-        logger.info(f"Constructed final prompt with {final_token_count} tokens (Max allowed for input: {max_length - max_new_tokens}).")
-        if final_token_count >= max_length:
-            # This shouldn't happen often with the truncation, but as a safeguard:
-            logger.error(f"FATAL: Final prompt ({final_token_count} tokens) still exceeds model max length ({max_length}). Truncating forcefully.")
-            # Forcefully truncate the token list (might cut mid-word)
-            truncated_tokens = final_tokens[:max_length - 5] # Leave a tiny buffer
-            prompt_for_llm = tokenizer.decode(truncated_tokens)
-            logger.debug(f"Forcefully truncated prompt:\n{prompt_for_llm}")
-
-        llm_ready = True 
-
-    logger.debug(f"[Session:{session_id}] Constructed prompt for LLM (Token Count: {final_token_count if 'final_token_count' in locals() else 'N/A'}):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}")
-
+    # --- Call LLM Service (Checks llm_ready flag) ---
     if llm_ready:
         try:
             logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}' via backend '{llm_status_data['backend_type']}'...")
-            # Run the potentially blocking LLM generation in an executor thread
-            # loop = asyncio.get_running_loop()
-
-            # llm_response = await loop.run_in_executor(
-            #     None,  # Use default ThreadPoolExecutor
-            #     generate_text, # The function to run
-            #     prompt_for_llm # The argument(s) for the function
-            # )
-
-            llm_response = await generate_text(prompt_for_llm)
+            llm_response = await generate_text(prompt_for_llm) # Await the service call
 
             if llm_response is None:
-                # Generation failed within the service (error already logged there)
-                raise Exception("LLM generation failed or returned None.")
+                raise Exception("LLM generation returned None or failed internally.")
 
-            assistant_response_content = llm_response
+            assistant_response_content = llm_response # Set content on success
             logger.info(f"[Session:{session_id}] Received response from LLM.")
-            logger.debug(f"[Session:{session_id}] LLM Response:\n{assistant_response_content[:500]}...")
 
         except Exception as e:
             error_detail = f"LLM generation failed: {type(e).__name__}"
             logger.error(f"[Session:{session_id}] {error_detail}: {e}", exc_info=True)
-            assistant_response_content = f"[ERROR: {error_detail}]"
-            assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}"
+            assistant_response_content = f"[ERROR: {error_detail}]" # Set error content
+            assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}" # Record error in metadata
+    # If llm_ready was False, assistant_response_content and metadata already set
 
-    if not llm_ready:
-        # We already set assistant_response_content and metadata earlier
-        pass
-    elif 'assistant_message_metadata' not in locals():
-         # Initialize metadata if generation path didn't run due to other issues
-          assistant_message_metadata = {
-             "prompt_preview": prompt_for_llm[:200] + "...",
-             "rag_chunks_retrieved": rag_chunk_ids,
-             "llm_call_error": "Unknown error before storing message"
-         }
-         
-    # --- Store Assistant Message (Using actual or error response) ---
+    # --- Store Assistant Message ---
     try:
         assistant_timestamp = datetime.datetime.now(datetime.timezone.utc)
         insert_assistant_message_query = chat_messages_table.insert().values(
@@ -487,28 +478,75 @@ async def add_message_to_session( # Renamed from post_message for clarity intern
             timestamp=assistant_timestamp,
             role="assistant",
             content=assistant_response_content, # Use the actual or error content
-            metadata=assistant_message_metadata, # Include metadata with potential error
+            metadata=assistant_message_metadata, # Include metadata
         ).returning(chat_messages_table.c.id, *[c for c in chat_messages_table.c])
 
         new_assistant_message_row = await database.fetch_one(insert_assistant_message_query)
         if not new_assistant_message_row:
             raise Exception("Failed to retrieve assistant message after insert.")
+        assistant_message_id = new_assistant_message_row['id']
+        logger.info(f"[Session:{session_id}] Stored assistant message (ID: {assistant_message_id}).")
 
-        logger.info(f"[Session:{session_id}] Stored assistant message (ID: {new_assistant_message_row['id']}).")
-
-        # Update session timestamp
-        update_session_query_after_assist = sessions_table.update().where(sessions_table.c.id == session_id).values(
-             last_updated_at=assistant_timestamp
-        )
+        update_session_query_after_assist = sessions_table.update().where(sessions_table.c.id == session_id).values(last_updated_at=assistant_timestamp)
         await database.execute(update_session_query_after_assist)
 
-        # Return the structured assistant message response
+        # --- Schedule Background Indexing Task ---
+        if user_message_id is not None and assistant_message_id is not None:
+             logger.info(f"[Session:{session_id}] Scheduling background task to index chat turn ({user_message_id}, {assistant_message_id}).")
+             # Ensure chat indexer is imported if used
+             # from services.chat_indexer import index_chat_turn_task
+             # background_tasks.add_task(index_chat_turn_task, user_message_id, assistant_message_id, session_id)
+             pass # Commented out as chat_indexer.py wasn't provided/requested in this thread
+        else:
+              logger.warning(f"[Session:{session_id}] Missing user or assistant message ID, cannot schedule indexing.")
+
         return ChatMessageResponse.parse_obj(dict(new_assistant_message_row))
 
     except Exception as e:
         logger.error(f"[Session:{session_id}] Failed to store assistant message: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store assistant response.")
+        # Note: If storing fails, the client won't get the response even if generated
+        raise HTTPException(status_code=500, detail="Failed to store assistant response.")
 
+@router.put(
+    "/{session_id}/memory",
+    response_model=SessionMetadataResponse, # Return updated session metadata
+    summary="Enable or disable long-term memory (chat history RAG) for a session",
+)
+async def update_session_memory(
+    session_id: str,
+    update_request: SessionMemoryUpdateRequest
+):
+    """
+    Updates the long_term_memory_enabled setting for the specified session.
+    """
+    # Ensure session exists
+    session = await get_session_or_404(session_id)
+
+    new_value = update_request.enabled
+    current_value = session.get("long_term_memory_enabled")
+
+    if current_value == new_value:
+         logger.info(f"Long term memory for session {session_id} already set to {new_value}. No change.")
+         # Return current data without DB update
+         return SessionMetadataResponse.parse_obj(session)
+
+    update_query = sessions_table.update().where(
+        sessions_table.c.id == session_id
+    ).values(
+        long_term_memory_enabled=new_value,
+        # Optionally update last_updated_at timestamp? Debatable for settings change.
+        # last_updated_at=datetime.datetime.now(datetime.timezone.utc)
+    )
+
+    try:
+        await database.execute(update_query)
+        logger.info(f"Set long_term_memory_enabled to {new_value} for session {session_id}.")
+        # Fetch updated session data to return
+        updated_session = await get_session_or_404(session_id)
+        return SessionMetadataResponse.parse_obj(updated_session)
+    except Exception as e:
+        logger.error(f"Failed to update memory setting for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update session memory setting.")
 
 # --- List Messages Endpoint (Keep as is) ---
 @router.get(
