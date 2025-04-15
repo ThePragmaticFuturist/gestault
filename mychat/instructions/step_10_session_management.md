@@ -1,5 +1,7 @@
 # Step 10: Implement session management in the React frontend (`App.jsx`)
 
+## Note - this file is out of sync with the src code due to some bugs I discovered and have now fixed ##
+
 Okay, let's implement session management in the React frontend (`App.jsx`). We'll automatically create a new session when the component first loads and store its ID in the state. We'll then use this ID for sending messages. We'll also add a "New Chat" button to allow users to reset the state and start fresh (which will trigger a new session creation on the next message).
 
 **1. Modify `App.jsx`**
