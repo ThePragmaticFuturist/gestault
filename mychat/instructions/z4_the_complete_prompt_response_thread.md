@@ -7594,3 +7594,7970 @@ Modify `generate_text` in `services/llm_service.py` to include `repetition_penal
 
 Let's try adding the `repetition_penalty` first.
 
+Okay, the repetition is still happening, although the pattern changed slightly with the new prompt format. This is quite common with base models like `gpt2` when they latch onto patterns in the prompt, especially combined with sampling parameters. `gpt2` isn't specifically trained to follow instructions or stop cleanly after a marker like `### RESPONSE:`.
+
+Here are the most likely solutions:
+
+1.  **Use `repetition_penalty`:** This is a standard parameter in `transformers` generation designed specifically to discourage the model from repeating itself. We can add it to our `generation_kwargs`.
+
+2.  **Try a Different Model:** `gpt2` is very basic. An instruction-tuned model (even a small one) is much more likely to understand the prompt structure and stop generating appropriately after the `### RESPONSE:` marker. Examples: `distilgpt2` (though still basic), `facebook/opt-125m`, or if your hardware allows (perhaps with quantization), a small Mistral or Llama variant.
+
+3.  **Adjust `max_new_tokens`:** The model is generating a *lot* of repetitive text, filling up the token limit. While not fixing the root cause, reducing `max_new_tokens` via the `/config` endpoint might make the output less overwhelming, but it won't stop the repetition itself.
+
+**Let's try adding `repetition_penalty` first, as it's a direct tool for this problem:**
+
+**Modify `generate_text` in `services/llm_service.py`:**
+
+Add `repetition_penalty` to the `generation_kwargs`. A value slightly above 1.0 (e.g., 1.1 or 1.2) is typical.
+
+```python
+# services/llm_service.py
+# ... (imports and other code) ...
+
+def generate_text(prompt: str) -> Optional[str]:
+    # ... (check status, get pipeline/config) ...
+
+    try:
+        logger.info("Generating text with LLM...")
+
+        # Define keys relevant for generation kwargs
+        generation_keys = {"max_new_tokens", "temperature", "top_p", "top_k"}
+        generation_kwargs = {k: config[k] for k in generation_keys if k in config}
+
+        # Add other necessary pipeline arguments
+        generation_kwargs["do_sample"] = True
+        generation_kwargs["num_return_sequences"] = 1
+
+        # --- ADD repetition_penalty ---
+        # Start with 1.1 or 1.2. Adjust if needed.
+        generation_kwargs["repetition_penalty"] = 1.15
+        # --- END ADD ---
+
+        logger.debug(f"Passing generation kwargs to pipeline: {generation_kwargs}")
+
+        outputs = pipeline(
+            prompt,
+            **generation_kwargs
+        )
+
+        # ... (extraction logic remains the same for now) ...
+        full_generated_text = outputs[0]['generated_text']
+        logger.debug(f"LLM Raw Output:\n{full_generated_text}")
+        response_marker = "\n### RESPONSE:"
+        prompt_marker_pos = prompt.rfind(response_marker)
+        if prompt_marker_pos != -1:
+             response_start_pos = prompt_marker_pos + len(response_marker)
+             if full_generated_text.startswith(prompt[:response_start_pos]):
+                  result = full_generated_text[response_start_pos:].strip()
+                  logger.debug("Extracted response by removing prompt up to marker.")
+             else:
+                  logger.warning("Generated text didn't start with the expected prompt prefix. Using full generated text.")
+                  result = full_generated_text.strip()
+        else:
+             logger.warning("Response marker not found in original prompt. Using full generated text.")
+             result = full_generated_text.strip()
+
+        logger.info("LLM text generation complete.")
+        return result
+
+    except Exception as e:
+        logger.error(f"LLM text generation failed: {e}", exc_info=True)
+        return None
+
+# ... (rest of the file) ...
+```
+
+**After Applying the Fix:**
+
+1.  Save the modified `services/llm_service.py`.
+2.  Restart Uvicorn.
+3.  Ensure `gpt2` is loaded.
+4.  Create a new session and send a message.
+5.  Check the response content.
+
+The `repetition_penalty` should hopefully discourage the model from getting stuck in that immediate loop. If it *still* repeats (though perhaps less severely), the next best step would be to try loading a different, instruction-tuned model via the `/api/v1/models/load` endpoint.
+
+{
+  "id": 22,
+  "session_id": "abc8b6c3-f7d6-4533-9852-433cfd33e041",
+  "timestamp": "2025-03-29T21:45:44.341216",
+  "role": "assistant",
+  "content": "",
+  "metadata": {
+    "prompt_preview": "### INSTRUCTION:\nYou are a helpful AI assistant. Respond to the user's query based on the provided context and chat history.\n\n### CHAT HISTORY:\nUser: Why is the sky blue?\n\n### USER QUERY:\nWhy is the s...",
+    "rag_chunks_retrieved": [],
+    "llm_call_error": null
+  }
+}
+
+Okay, now the `content` field is empty! This usually means one of two things happened after adding the `repetition_penalty`:
+
+1.  **Extraction Logic Issue:** The model generated *something*, but our logic to extract the text *after* `### RESPONSE:` failed, resulting in an empty string. This could happen if the model's output didn't start exactly as expected or if the generated part itself was empty after stripping whitespace.
+2.  **Model Generated Nothing (or only whitespace/EOS):** The `repetition_penalty` might have been too aggressive for `gpt2` with the other parameters, causing it to generate only an end-of-sequence token (or whitespace) immediately after the prompt, leading to an empty string after extraction.
+
+**Let's Debug:**
+
+1.  **Check the Raw Output:** The most important clue is the raw output from the model. Look for the `LLM Raw Output:` line in your server logs for the corresponding request. What does the text *immediately following* `### RESPONSE:` look like in that raw output?
+    *   Is there actual text there, even just a few characters or spaces?
+    *   Is it completely empty?
+    *   Does it contain strange tokens?
+
+2.  **Review Extraction Logic (`services/llm_service.py`):** Let's re-examine the extraction part in `generate_text`:
+    ```python
+            full_generated_text = outputs[0]['generated_text']
+            logger.debug(f"LLM Raw Output:\n{full_generated_text}") # Check this log
+            response_marker = "\n### RESPONSE:"
+            prompt_marker_pos = prompt.rfind(response_marker)
+
+            if prompt_marker_pos != -1:
+                 response_start_pos = prompt_marker_pos + len(response_marker)
+                 if full_generated_text.startswith(prompt[:response_start_pos]):
+                      # If the model generated only whitespace/EOS after the marker,
+                      # .strip() would make it empty.
+                      result = full_generated_text[response_start_pos:].strip()
+                      logger.debug(f"Extracted response by removing prompt up to marker. Result after strip: '{result}'") # Add log here
+                 else:
+                      # This path might be taken if the model only generated the response part
+                      logger.warning("Generated text didn't start with the expected prompt prefix. Using full generated text.")
+                      result = full_generated_text.strip() # Stripping the full output might also lead to empty if it was just EOS/whitespace
+            else:
+                 logger.warning("Response marker not found in original prompt. Using full generated text.")
+                 result = full_generated_text.strip()
+
+            # Add a check specifically for empty result *before* returning
+            if not result:
+                logger.warning("Extraction resulted in an empty string. Check raw LLM output and generation parameters.")
+
+            logger.info("LLM text generation complete.")
+            return result
+    ```
+    *   I've added another `logger.debug` to show the result *after* stripping.
+    *   Added a warning if the final `result` is empty.
+
+3.  **Adjust `repetition_penalty`:** Maybe 1.15 was too high for `gpt2`. Try reducing it slightly (e.g., 1.1 or 1.05) in `generation_kwargs` within `generate_text`.
+
+4.  **Try a Different Model:** This is still a strong possibility. `gpt2` might just not be capable of handling this prompt format reliably, even with penalties. Try loading `distilgpt2` (if not already tried) or another small instruction model.
+
+**Next Steps:**
+
+1.  Add the extra logging lines to the extraction logic in `services/llm_service.py` as shown above.
+2.  Restart the server.
+3.  Ensure `gpt2` is loaded.
+4.  Send the same message ("Why is the sky blue?") again.
+5.  **Carefully examine the logs:**
+    *   Find the `LLM Raw Output:` line. What's after `### RESPONSE:`?
+    *   See the `Result after strip:` log message.
+    *   See if the `Extraction resulted in an empty string` warning appears.
+6.  Based on the logs:
+    *   If the raw output contains text but the extracted result is empty, the issue might be the `.strip()` removing everything.
+    *   If the raw output itself contains nothing meaningful after the marker, try reducing `repetition_penalty` or switch to a different model.
+
+Let me know what the logs reveal!
+
+"let's try something else. How do I get the server to return a list of the available local LLMs I have in my Hugging Face Hub?"
+
+Here's a thinking process for implementing the "list local Hugging Face Hub models" functionality:
+
+1.  **Understand the Goal:** The user wants an API endpoint that doesn't just scan a specific `local_models` directory but instead lists models that have been downloaded *through* the Hugging Face ecosystem and are present in the central Hugging Face cache directory.
+
+2.  **Identify the Cache Location:** The Hugging Face Hub downloads models and stores them in a cache directory.
+    *   How is this location determined? It's based on environment variables (`HF_HOME`, `TRANSFORMERS_CACHE`, `HF_HUB_CACHE`) or defaults (`~/.cache/huggingface/hub`).
+    *   Our `settings` object already has `settings.HUGGINGFACE_HUB_CACHE`. We should use this configured path as the authoritative location to scan.
+
+3.  **Determine What Constitutes a "Model":** When `transformers` downloads a model (like "gpt2" or "bert-base-uncased"), it creates a structure within the cache. What does it look like?
+    *   Typically, there's a `models--<org_name>--<model_name>` directory structure (e.g., `models--gpt2`, `models--bert-base-uncased`, `models--TheBloke--Mistral-7B-Instruct-v0.1-GGUF`).
+    *   Inside *that* directory, there's usually a `snapshots` subdirectory.
+    *   Inside `snapshots`, there's one or more directories named by commit hashes (e.g., `c999049006b43b10041e90415c0a471e1f08d571`).
+    *   Inside a *specific snapshot (commit hash) directory*, you find the actual model files (`config.json`, `.bin`, `.safetensors`, tokenizer files, etc.).
+
+4.  **Devise a Scanning Strategy:**
+    *   Start at `settings.HUGGINGFACE_HUB_CACHE`.
+    *   Iterate through items directly within this directory.
+    *   Look for directories matching the pattern `models--*--*`. (Need to be careful, sometimes it's just `models--model_name` if no organization).
+    *   For each potential model directory found:
+        *   Extract the "model ID" (e.g., "gpt2", "bert-base-uncased", "TheBloke/Mistral-7B-Instruct-v0.1-GGUF") from the directory name. This requires parsing the `models--` prefix and replacing `--` with `/`.
+        *   Verify it's actually a model cache: Check for the existence of a `snapshots` subdirectory inside.
+        *   Maybe even check if there's at least one snapshot directory inside `snapshots`. (Optional but adds robustness).
+    *   Collect the extracted model IDs.
+
+5.  **Implement the Service Function:** Create a new function, perhaps `list_cached_hub_models()`, in `services/llm_service.py`.
+    *   Import `Path` from `pathlib`.
+    *   Use `settings.HUGGINGFACE_HUB_CACHE`.
+    *   Handle the case where the cache directory doesn't exist.
+    *   Iterate using `iterdir()`.
+    *   Use `item.is_dir()` and `item.name.startswith("models--")`.
+    *   Parse the name: `model_id = item.name.removeprefix("models--").replace("--", "/")`.
+    *   Check for `(item / "snapshots").is_dir()`.
+    *   Append valid `model_id`s to a list.
+    *   Return the list.
+
+6.  **Update the API Endpoint/Model:**
+    *   Modify the `AvailableModelsResponse` model (`app/api/models/llm.py`) to include a field like `cached_hub_models: List[str]`.
+    *   Modify the `get_available_models` endpoint (`app/api/endpoints/models.py`):
+        *   Import the new service function `list_cached_hub_models`.
+        *   Call *both* `list_local_models()` (for the dedicated `local_models` dir) *and* `list_cached_hub_models()`.
+        *   Return both lists in the `AvailableModelsResponse`.
+
+7.  **Refine and Test:**
+    *   Consider edge cases: What if the cache dir is empty? What if a directory starts with `models--` but isn't a model?
+    *   Add logging within the scanning function for debugging.
+    *   Restart the server.
+    *   Call the `GET /api/v1/models/available` endpoint.
+    *   Verify the response includes models found in the HF cache *and* models in the `local_models` directory (if any). Ensure the IDs look correct (e.g., `TheBloke/Mistral-7B...` not `TheBloke--Mistral-7B...`).
+
+8.  **Self-Correction/Improvements:**
+    *   The initial parsing `replace("--", "/")` is simple but might fail if a model/org name *itself* contains `--`. A more robust approach might involve splitting by `--` and rejoining with `/`, handling the case of only one `--`. Let's stick with the simple replace for now, as it covers most common cases.
+    *   Should we list *all* snapshots or just confirm the model exists? Just confirming existence seems sufficient for listing available models.
+    *   Could add GGUF file scanning to the `list_local_models` function as well, since those might be stored there directly. (Keep separate for now).
+    *   Ensure paths are handled correctly (e.g., using `pathlib`).
+  
+Okay, that's a useful feature. Instead of just scanning our dedicated `local_models` directory, you want to inspect the *actual Hugging Face cache* where models downloaded via `transformers` (or `huggingface_hub`) are stored.
+
+Here's how we can implement that:
+
+1.  **Identify the HF Cache Directory:** We already have `settings.HUGGINGFACE_HUB_CACHE` defined in our `core/config.py`. This is the directory we need to scan.
+
+2.  **Understand HF Cache Structure:** Models downloaded from the Hub are typically stored in subdirectories like:
+    *   `models--gpt2`
+    *   `models--bert-base-uncased`
+    *   `models--google--flan-t5-large` (using `--` as separator for organization/model name)
+    Inside these, there's often a `snapshots/<commit_hash>/` structure containing the actual files. We just need to identify the top-level model directories.
+
+3.  **Implement Scanning Logic in `services/llm_service.py`:**
+    We'll add a new function to specifically scan the Hub cache and parse the directory names back into model IDs.
+
+    ```python
+    # services/llm_service.py
+    import time
+    import logging
+    import asyncio
+    import gc
+    from enum import Enum
+    from pathlib import Path
+    from typing import Optional, Dict, Any, List
+
+    import torch
+    # ... (other imports: pipeline, AutoModelForCausalLM, etc.)
+
+    from core.config import settings
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # ... (LLMStatus Enum, llm_state dictionary) ...
+
+
+    # --- Helper Function to Scan Dedicated Local Models Dir ---
+    def list_local_models() -> List[str]:
+        """Scans the DEDICATED LOCAL_MODELS_DIR for potential model directories."""
+        local_models = []
+        models_dir = settings.LOCAL_MODELS_DIR
+        logger.info(f"Scanning for local models in: {models_dir}")
+        if models_dir.is_dir():
+            for item in models_dir.iterdir():
+                if item.is_dir():
+                    has_config = (item / "config.json").is_file()
+                    has_pytorch_bin = list(item.glob("*.bin"))
+                    has_safetensors = list(item.glob("*.safetensors"))
+                    if has_config and (has_pytorch_bin or has_safetensors):
+                        logger.debug(f"Found potential local model directory: {item.name}")
+                        local_models.append(str(item.resolve()))
+        logger.info(f"Found {len(local_models)} potential models in {models_dir}.")
+        return local_models
+
+    # --- NEW: Helper Function to Scan HF Hub Cache ---
+    def list_cached_hub_models() -> List[str]:
+        """Scans the Hugging Face Hub cache directory for downloaded models."""
+        hub_models = []
+        cache_dir = settings.HUGGINGFACE_HUB_CACHE
+        logger.info(f"Scanning for cached Hub models in: {cache_dir}")
+
+        if not cache_dir.is_dir():
+            logger.warning(f"Hugging Face cache directory not found: {cache_dir}")
+            return []
+
+        for item in cache_dir.iterdir():
+            # Look for directories starting with 'models--'
+            if item.is_dir() and item.name.startswith("models--"):
+                # Check if it contains snapshots (a good indicator it's a model cache)
+                snapshots_dir = item / "snapshots"
+                if snapshots_dir.is_dir() and any(snapshots_dir.iterdir()): # Check if snapshots is not empty
+                    # Parse directory name back to model ID
+                    # Example: 'models--google--flan-t5-large' -> 'google/flan-t5-large'
+                    # Example: 'models--gpt2' -> 'gpt2'
+                    model_id = item.name.removeprefix("models--").replace("--", "/")
+                    logger.debug(f"Found potential cached Hub model: {model_id} (from {item.name})")
+                    hub_models.append(model_id)
+
+        logger.info(f"Found {len(hub_models)} potential cached models in {cache_dir}.")
+        return sorted(list(set(hub_models))) # Return sorted unique list
+
+    # ... (_load_model_task, get_llm_status, update_llm_config, generate_text) ...
+    # NOTE: The _load_model_task should work fine with these Hub IDs without modification
+
+    ```
+    *   Renamed the original `list_local_models` slightly for clarity (scanning the *dedicated* directory).
+    *   Added `list_cached_hub_models` function.
+    *   It iterates through the configured `HUGGINGFACE_HUB_CACHE`.
+    *   Looks for directories starting with `models--`.
+    *   Checks for a non-empty `snapshots` subdirectory inside as confirmation.
+    *   Parses the directory name (e.g., `models--google--flan-t5-large`) back into the standard Hub ID format (`google/flan-t5-large`) using `removeprefix` and `replace`.
+    *   Returns a sorted, unique list of found model IDs.
+
+4.  **Update API Model (`app/api/models/llm.py`):**
+    Modify `AvailableModelsResponse` to include the list of cached Hub models.
+
+    ```python
+    # app/api/models/llm.py
+    from pydantic import BaseModel, Field
+    from typing import List, Optional, Dict, Any
+    # ... (other models: ModelLoadRequest, etc.)
+
+    class AvailableModelsResponse(BaseModel):
+        local_model_paths: List[str] = Field(description="Absolute paths to models found in the dedicated local_models directory.")
+        cached_hub_models: List[str] = Field(description="Model IDs found in the Hugging Face Hub cache directory.")
+    ```
+    *   Renamed `local_models` to `local_model_paths` for clarity (since they are paths).
+    *   Added `cached_hub_models`.
+
+5.  **Update API Endpoint (`app/api/endpoints/models.py`):**
+    Modify the `get_available_models` endpoint to call both scanning functions.
+
+    ```python
+    # app/api/endpoints/models.py
+    # ... (imports) ...
+    # Make sure both service functions are imported
+    from services.llm_service import (
+        list_local_models,
+        list_cached_hub_models, # <-- Import the new function
+        _load_model_task,
+        get_llm_status,
+        update_llm_config,
+        llm_state,
+        LLMStatus
+    )
+    # ... (other imports) ...
+
+    router = APIRouter()
+
+    @router.get(
+        "/available",
+        response_model=AvailableModelsResponse,
+        summary="List available local and cached Hub models", # Updated summary
+    )
+    async def get_available_models():
+        """
+        Scans the configured local models directory and the Hugging Face cache
+        directory and returns lists of found models.
+        """
+        try:
+            local_paths = list_local_models()
+            hub_ids = list_cached_hub_models()
+            return AvailableModelsResponse(
+                local_model_paths=local_paths,
+                cached_hub_models=hub_ids
+            )
+        except Exception as e:
+            logger.error(f"Error listing available models: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to list available models.")
+
+    # ... (rest of the endpoints: /load, /status, /config) ...
+    ```
+    *   Calls both `list_local_models` and `list_cached_hub_models`.
+    *   Populates the updated `AvailableModelsResponse`.
+
+6.  **Run and Test:**
+    *   Restart the server: `uvicorn app.main:app --reload ...`
+    *   Ensure you have previously loaded at least one model from the Hub (like `gpt2`) so it exists in the cache (`~/.cache/huggingface/hub` or your configured path).
+    *   Execute `GET /api/v1/models/available` via the `/docs` page or `curl`.
+    *   Check the response. It should now contain two lists:
+        *   `local_model_paths`: Listing any models found in your specific `./local_models` folder (if any).
+        *   `cached_hub_models`: Listing the IDs (like `"gpt2"`, `"all-MiniLM-L6-v2"`, etc.) found in the central HF cache.
+
+This provides a much more comprehensive view of the models readily available to the server.
+
+INFO:services.llm_service:Scanning for local models in: /home/ken/Documents/gestalt/rag_llm_server/local_models
+INFO:services.llm_service:Found 0 potential models in /home/ken/Documents/gestalt/rag_llm_server/local_models.
+INFO:services.llm_service:Scanning for cached Hub models in: /home/ken/Documents/gestalt/rag_llm_server/models_cache
+INFO:services.llm_service:Found 1 potential cached models in /home/ken/Documents/gestalt/rag_llm_server/models_cache.
+INFO:     127.0.0.1:57370 - "GET /api/v1/models/available HTTP/1.1" 200 OK
+INFO:app.api.endpoints.documents:Received upload: beyond lies the wub.txt, size: 15888, assigned ID: 6c6b8c50-16b1-4586-bdb0-28cb016ed259
+INFO:app.api.endpoints.documents:Saved temporary file to: /tmp/rag_server_uploads/6c6b8c50-16b1-4586-bdb0-28cb016ed259_beyond lies the wub.txt
+INFO:app.api.endpoints.documents:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Initial document record created in DB.
+INFO:app.api.endpoints.documents:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Background processing task scheduled for beyond lies the wub.txt.
+INFO:     127.0.0.1:54630 - "POST /api/v1/documents/upload HTTP/1.1" 202 Accepted
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Starting processing for: beyond lies the wub.txt
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Detected MIME type: text/plain
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Extracting text...
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Extracted 15425 characters.
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Chunking text...
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Created 18 chunks.
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Saving 18 chunk records to SQLite...
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Saved chunk records to SQLite.
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Generating embeddings for 18 chunks...
+INFO:services.embedding_service:Generating embeddings for 18 text chunks...
+INFO:services.embedding_service:Generated 18 embeddings in 0.13 seconds.
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Generated 18 embeddings.
+INFO:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Adding 18 embeddings to ChromaDB collection 'rag_documents'...
+ERROR:services.document_processor:[6c6b8c50-16b1-4586-bdb0-28cb016ed259] Failed to add embeddings to ChromaDB: Expected embeddings to be a list of floats or ints, a list of lists, a numpy array, or a list of numpy arrays, got [tensor([-1.2638e-01,  8.1670e-02, -4.4166e-02,  8.1949e-02, -4.4931e-02,
+         1.0718e-03, -3.3571e-03, -1.7960e-02, -7.5499e-03,  1.3328e-03,
+        -2.4279e-02, -4.1684e-02,  2.3165e-02,  2.1014e-03, -6.0290e-02,
+         5.0601e-02, -4.0105e-02,  2.7765e-02, -4.7813e-04,  4.0694e-02,
+         3.2372e-03,  2.7690e-02,  3.3808e-02, -1.0557e-02, -3.7772e-02,
+
+The user is encountering an error during the ChromaDB insertion phase of document processing.
+The error message is: `Failed to add embeddings to ChromaDB: Expected embeddings to be a list of floats or ints, a list of lists, a numpy array, or a list of numpy arrays, got [tensor(...)]`
+
+Looking at the log:
+1.  Document upload and processing seem fine up to embedding generation.
+2.  `generate_embeddings` logs `Generated 18 embeddings in 0.13 seconds.`
+3.  The error happens in `services/document_processor.py` when calling `doc_collection.add(...)`.
+4.  The error message indicates that the `embeddings` argument passed to `doc_collection.add` contains PyTorch tensors, not the expected format (list of lists of floats, or numpy arrays).
+
+Let's trace back:
+- `add_message_to_session` in `sessions.py` calls `generate_embeddings` from `embedding_service.py` to embed the *user query*.
+- `process_document_upload` in `document_processor.py` calls `generate_embeddings` from `embedding_service.py` to embed the *document chunks*.
+- The `generate_embeddings` function in `embedding_service.py` currently has this line:
+  ```python
+  embeddings = model.encode(
+      texts,
+      batch_size=settings.EMBEDDING_BATCH_SIZE,
+      show_progress_bar=False,
+      convert_to_numpy=False # Returns List[torch.Tensor] or List[List[float]] ? Need to re-check sentence-transformers docs.
+  )
+  ```
+  Then it just returns `embeddings`.
+
+Rethink `convert_to_numpy=False`. According to `sentence-transformers` documentation (and common usage), when `convert_to_numpy=False` and the model runs on GPU (PyTorch backend), `model.encode` typically returns a `torch.Tensor` if a single text is passed, or a `List[torch.Tensor]` if a list of texts is passed *unless* `convert_to_tensor=False` is *also* specified. If neither `convert_to_numpy` nor `convert_to_tensor` is True, it defaults to returning a `List[List[float]]` (on CPU) or potentially tensors (on GPU). It's slightly ambiguous or depends on versions/context.
+
+However, the error message `got [tensor(...)]` suggests that the `embeddings` variable being passed to `doc_collection.add` is indeed a list containing PyTorch tensors. ChromaDB's `add` method expects lists of floats or numpy arrays.
+
+**Solution:** Modify `generate_embeddings` to explicitly convert the result to the format ChromaDB expects (list of lists of floats). The easiest way is to ensure it's converted to a list *after* the encoding, regardless of the intermediate type.
+
+Let's re-examine the `generate_embeddings` function and ensure the return type is consistently `List[List[float]]`.
+
+```python
+# services/embedding_service.py
+
+def generate_embeddings(texts: List[str]) -> Optional[List[List[float]]]:
+    """Generates embeddings for a list of texts using the loaded model."""
+    # ... (checks, get model, start time) ...
+    try:
+        embeddings_output = model.encode(
+            texts,
+            batch_size=settings.EMBEDDING_BATCH_SIZE,
+            show_progress_bar=False,
+            convert_to_numpy=False, # Let's stick with this for now
+            # convert_to_tensor=False # Could also try adding this
+        )
+
+        gen_time = time.time() - start_time
+
+        # --- Conversion to List[List[float]] ---
+        # Regardless of whether encode returns Tensor, List[Tensor], or List[List[float]],
+        # convert it definitively to List[List[float]] for ChromaDB.
+        if isinstance(embeddings_output, torch.Tensor):
+            # Handle case where a single tensor is returned (unlikely for list input)
+            # or a batch tensor (if batch_size=1 and only one input text?)
+            embeddings_list = embeddings_output.tolist()
+            # Ensure it's List[List[float]] even if input was single text [[...]]
+            if texts and len(texts) == 1 and isinstance(embeddings_list, list) and not isinstance(embeddings_list[0], list):
+                 embeddings_list = [embeddings_list]
+        elif isinstance(embeddings_output, list):
+             if len(embeddings_output) > 0 and isinstance(embeddings_output[0], torch.Tensor):
+                 # Handle List[Tensor]
+                 embeddings_list = [tensor.tolist() for tensor in embeddings_output]
+             elif len(embeddings_output) > 0 and isinstance(embeddings_output[0], list):
+                 # Already List[List[float]] (or List[List[int]]?)
+                 embeddings_list = embeddings_output
+             elif len(embeddings_output) == 0:
+                 embeddings_list = []
+             else:
+                 # Unexpected list content type
+                 logger.error(f"Unexpected content type in list from model.encode: {type(embeddings_output[0])}")
+                 return None
+        else:
+            # Unexpected output type
+            logger.error(f"Unexpected output type from model.encode: {type(embeddings_output)}")
+            return None
+
+        logger.info(f"Generated and converted {len(embeddings_list)} embeddings in {gen_time:.2f} seconds.")
+        return embeddings_list
+
+    except Exception as e:
+        logger.error(f"Error generating embeddings: {e}", exc_info=True)
+        return None
+
+```
+This revised logic explicitly checks the type returned by `model.encode` and calls `.tolist()` appropriately to ensure the final result passed back is `List[List[float]]`.
+
+Now, let's check the call site in `services/document_processor.py`:
+```python
+# services/document_processor.py
+# ... inside process_document_upload ...
+            # 5. Generate Embeddings
+            # ...
+            embeddings = generate_embeddings(chunks_for_embedding) # This should now return List[List[float]]
+
+            if embeddings is None or len(embeddings) != chunk_count:
+                raise RuntimeError(f"Embedding generation failed or returned incorrect number of vectors.")
+            # ...
+
+            # 6. Store Embeddings in ChromaDB
+            # ...
+            doc_collection.add(
+                ids=chunk_ids,
+                embeddings=embeddings, # Pass the List[List[float]]
+                documents=chunks_for_embedding,
+                metadatas=chroma_metadatas
+            )
+            # ...
+```
+This looks correct. The `embeddings` variable received from the updated `generate_embeddings` should now be in the format ChromaDB expects.
+
+Okay, we've stumbled upon an interaction between the `sentence-transformers` output format and what ChromaDB expects.
+
+**Diagnosis:**
+
+1.  **Successful Embedding Generation:** The `services.embedding_service` successfully generated 18 embeddings.
+2.  **ChromaDB Error:** The error occurs when `services.document_processor.py` tries to add these embeddings to ChromaDB using `doc_collection.add(...)`.
+3.  **Error Message:** `Expected embeddings to be a list of floats or ints, a list of lists, a numpy array, or a list of numpy arrays, got [tensor(...)]`
+4.  **Root Cause:** Our `generate_embeddings` function (in `services/embedding_service.py`), configured with `convert_to_numpy=False`, is returning a list where each element is a PyTorch `tensor` object (e.g., `List[torch.Tensor]`), likely because the model is running on the GPU (`cuda`). ChromaDB's client library doesn't automatically handle PyTorch tensors; it expects standard Python lists of floats or NumPy arrays.
+
+**Solution:**
+
+We need to modify the `generate_embeddings` function in `services/embedding_service.py` to explicitly convert the tensors to lists of floats before returning them.
+
+```python
+# services/embedding_service.py
+# ... (imports: Optional, List, torch, SentenceTransformer, settings, logger) ...
+
+# --- Global variable for model ---
+# ... (_embedding_model) ...
+
+# --- Loading functions ---
+# ... (_load_embedding_model, get_embedding_model) ...
+
+def generate_embeddings(texts: List[str]) -> Optional[List[List[float]]]:
+    """
+    Generates embeddings for a list of texts using the loaded model.
+    Ensures the output is List[List[float]] for compatibility.
+    """
+    if not texts:
+        return []
+    try:
+        model = get_embedding_model()
+        logger.info(f"Generating embeddings for {len(texts)} text chunks...")
+        start_time = time.time()
+
+        # Generate embeddings (may return tensors or lists depending on settings/device)
+        embeddings_output = model.encode(
+            texts,
+            batch_size=settings.EMBEDDING_BATCH_SIZE,
+            show_progress_bar=False,
+            convert_to_numpy=False # Keep this, we'll convert tensor manually if needed
+        )
+        gen_time = time.time() - start_time
+
+        # --- ### NEW: Explicit Conversion to List[List[float]] ### ---
+        final_embeddings: List[List[float]] = []
+        if isinstance(embeddings_output, list):
+            if len(embeddings_output) > 0:
+                if isinstance(embeddings_output[0], torch.Tensor):
+                    # Input was List[Tensor], convert each tensor
+                    logger.debug("Converting List[Tensor] output to List[List[float]].")
+                    final_embeddings = [tensor.tolist() for tensor in embeddings_output]
+                elif isinstance(embeddings_output[0], list):
+                    # Already List[List[float]] (or similar)
+                    logger.debug("Output is already List[List[...]], using as is.")
+                    final_embeddings = embeddings_output
+                else:
+                    logger.error(f"Unexpected item type in embedding list: {type(embeddings_output[0])}")
+                    return None
+            # If empty list, final_embeddings remains []
+        elif isinstance(embeddings_output, torch.Tensor):
+             # Handle case where encode might return a single tensor for batch=1 or single input?
+             logger.debug("Converting single Tensor output to List[List[float]].")
+             # Need to wrap in another list to match ChromaDB expectation for multiple embeddings
+             single_list = embeddings_output.tolist()
+             # Check if it's already nested [[...]] or just [...]
+             if isinstance(single_list[0], list):
+                 final_embeddings = single_list
+             else:
+                 final_embeddings = [single_list] # Wrap the single list
+        else:
+             logger.error(f"Unexpected output type from model.encode: {type(embeddings_output)}")
+             return None
+        # --- ### END EXPLICIT CONVERSION ### ---
+
+
+        logger.info(f"Generated and converted {len(final_embeddings)} embeddings in {gen_time:.2f} seconds.")
+        return final_embeddings
+
+    except Exception as e:
+        logger.error(f"Error generating embeddings: {e}", exc_info=True)
+        return None
+
+# ... (rest of the file) ...
+```
+
+**Explanation of Change:**
+
+1.  We capture the output of `model.encode` into `embeddings_output`.
+2.  We explicitly check if `embeddings_output` is a `list` or a `torch.Tensor`.
+3.  **If it's a list:** We check the type of the *first element*.
+    *   If the elements are `torch.Tensor`, we iterate through the list and call `.tolist()` on each tensor to convert it into a standard Python list of floats.
+    *   If the elements are already `list`s, we assume it's the correct format (`List[List[float]]`) and use it directly.
+    *   Handles empty list case.
+4.  **If it's a single `torch.Tensor`:** (Less likely for list input but good safeguard) We call `.tolist()` on it and ensure it's wrapped in an outer list `[[...]]` to represent a collection of embeddings, even if there's only one.
+5.  The function now consistently returns `final_embeddings`, which is guaranteed to be `List[List[float]]` or `None` on error.
+
+**After Applying the Fix:**
+
+1.  Save the corrected `services/embedding_service.py`.
+2.  Restart Uvicorn.
+3.  Upload the `beyond lies the wub.txt` document (or another one) again.
+4.  Monitor the logs. The error during the `doc_collection.add` step in `services/document_processor.py` should now be gone, and the embeddings should be successfully added to ChromaDB. Check the final status of the document using the API (`GET /api/v1/documents/status/{doc_id}`). It should reach `completed`.
+
+Let me know the outcome!
+
+--> Event: startup
+INFO:databases:Connected to database sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server/data/rag_server.db
+Database connection established.
+--> Pre-loading embedding model...
+INFO:services.embedding_service:Loading embedding model 'all-MiniLM-L6-v2' onto device 'cuda'...
+INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+INFO:services.embedding_service:Embedding model loaded successfully in 1.00 seconds.
+--> Embedding model loading initiated.
+--> Event: startup complete.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:38268 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38268 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:app.api.endpoints.models:Received request to load model 'gpt2' with device='cuda', quantization='None'.
+INFO:app.api.endpoints.models:Scheduled background loading task for model 'gpt2'.
+INFO:     127.0.0.1:47584 - "POST /api/v1/models/load HTTP/1.1" 202 Accepted
+INFO:services.llm_service:Starting model loading task for 'gpt2' on device 'cuda' with quantization 'None'...
+INFO:services.llm_service:Initializing pipeline with: model='gpt2', device_map='cuda', quantization_config=None
+Device set to use cuda
+INFO:services.llm_service:Successfully loaded model 'gpt2' in 0.42 seconds.
+INFO:services.llm_service:Model loading task for 'gpt2' finished in 0.42 seconds. Status: Loaded
+INFO:app.api.endpoints.documents:Received upload: the magic shop.txt, size: 22295, assigned ID: e3a399ac-ed0f-4850-99fe-6df12c3a1ed3
+INFO:app.api.endpoints.documents:Saved temporary file to: /tmp/rag_server_uploads/e3a399ac-ed0f-4850-99fe-6df12c3a1ed3_the magic shop.txt
+INFO:app.api.endpoints.documents:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Initial document record created in DB.
+INFO:app.api.endpoints.documents:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Background processing task scheduled for the magic shop.txt.
+INFO:     127.0.0.1:51584 - "POST /api/v1/documents/upload HTTP/1.1" 202 Accepted
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Starting processing for: the magic shop.txt
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Detected MIME type: text/plain
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Extracting text...
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Extracted 22063 characters.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Chunking text...
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Created 32 chunks.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Saving 32 chunk records to SQLite...
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Saved chunk records to SQLite.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Generating embeddings for 32 chunks...
+INFO:services.embedding_service:Generating embeddings for 32 text chunks...
+INFO:services.embedding_service:Generated and converted 32 embeddings in 0.15 seconds.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Generated 32 embeddings.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Adding 32 embeddings to ChromaDB collection 'rag_documents'...
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Successfully added embeddings to ChromaDB.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Processing finished. Final status: completed
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Cleaned up temporary file: /tmp/rag_server_uploads/e3a399ac-ed0f-4850-99fe-6df12c3a1ed3_the magic shop.txt
+INFO:     127.0.0.1:54596 - "GET /api/v1/documents/status/e3a399ac-ed0f-4850-99fe-6df12c3a1ed3 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56930 - "GET /api/v1/documents/?skip=0&limit=100 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52402 - "POST /api/v1/sessions/e3a399ac-ed0f-4850-99fe-6df12c3a1ed3/messages HTTP/1.1" 404 Not Found
+
+The user provided logs indicating successful document processing and embedding, including adding embeddings to ChromaDB. However, the very last log line shows a `404 Not Found` error when trying to POST a message to a session:
+
+`INFO: 127.0.0.1:52402 - "POST /api/v1/sessions/e3a399ac-ed0f-4850-99fe-6df12c3a1ed3/messages HTTP/1.1" 404 Not Found`
+
+This is unexpected. The path `/api/v1/sessions/{session_id}/messages` should be handled by the `add_message_to_session` function in `app/api/endpoints/sessions.py`. A 404 usually means either:
+
+1.  **The route itself doesn't exist:** FastAPI couldn't match the path `/api/v1/sessions/{session_id}/messages` with the `POST` method to any registered route. This is unlikely since we defined it with `@router.post("/{session_id}/messages", ...)` and included the `sessions.router` in `main.py` with the prefix `/api/v1/sessions`.
+2.  **A path parameter mismatch:** The `{session_id}` part is not being correctly captured or validated. This is also unlikely with FastAPI's standard handling.
+3.  **The `get_session_or_404` helper raised the 404:** This is the most probable cause. The `add_message_to_session` function starts by calling `session = await get_session_or_404(session_id)`. If the session ID provided in the URL (`e3a399ac-ed0f-4850-99fe-6df12c3a1ed3`) does *not* exist in the `sessions` table in the SQLite database, the helper function will raise an `HTTPException` with status code 404, which FastAPI translates into the HTTP 404 response.
+
+Looking at the logs *before* the 404 error:
+- A document with ID `e3a399ac-ed0f-4850-99fe-6df12c3a1ed3` was successfully processed.
+- There's no log showing a session being *created* with that specific ID. Session IDs are generated using `uuid.uuid4()` in the `create_session` endpoint, they are distinct from document IDs.
+
+Therefore, the user likely tried to post a message using the *document ID* in the URL instead of a valid *session ID*.
+
+**Plan:** Explain to the user that the 404 error occurred because they used a document ID where a session ID was expected in the URL path for posting a message. Remind them of the workflow:
+1. Upload document (get doc ID).
+2. Create a session (get session ID, optionally linking the doc ID in the request body).
+3. Post messages using the *session ID* in the URL path.
+Suggest they check the `GET /api/v1/sessions/` endpoint to find valid session IDs or create a new session first.
+
+Excellent! The logs show that the document processing, including the embedding and ChromaDB addition steps, is now working perfectly after the fix to `generate_embeddings`.
+
+```
+INFO:services.embedding_service:Generated and converted 32 embeddings in 0.15 seconds.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Generated 32 embeddings.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Adding 32 embeddings to ChromaDB collection 'rag_documents'...
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Successfully added embeddings to ChromaDB.
+INFO:services.document_processor:[e3a399ac-ed0f-4850-99fe-6df12c3a1ed3] Processing finished. Final status: completed
+```
+
+However, you then encountered a `404 Not Found` error on this line:
+
+```
+INFO:     127.0.0.1:52402 - "POST /api/v1/sessions/e3a399ac-ed0f-4850-99fe-6df12c3a1ed3/messages HTTP/1.1" 404 Not Found
+```
+
+**Reason for the 404 Error:**
+
+The ID in the URL (`e3a399ac-ed0f-4850-99fe-6df12c3a1ed3`) is the **Document ID** for "the magic shop.txt". The endpoint `POST /api/v1/sessions/{session_id}/messages` expects a **Session ID** in the path, not a Document ID.
+
+Our `add_message_to_session` function starts with `session = await get_session_or_404(session_id)`. Since there is no session with the ID `e3a399ac-ed0f-4850-99fe-6df12c3a1ed3` in your `sessions` table, the `get_session_or_404` helper correctly raised the `HTTPException(status_code=404, ...)` which FastAPI returns as the 404 response.
+
+**Correct Workflow:**
+
+1.  **Upload Document:** `POST /api/v1/documents/upload` (You did this, got doc ID `e3a3...`).
+2.  **Create Session:** `POST /api/v1/sessions/`. Optionally link the document ID in the *request body*:
+    ```json
+    {
+      "name": "Magic Shop Chat",
+      "rag_document_ids": ["e3a399ac-ed0f-4850-99fe-6df12c3a1ed3"]
+    }
+    ```
+    The response to *this* request will give you a unique **Session ID** (e.g., `"49f340de-..."` from your previous logs).
+3.  **Send Message:** `POST /api/v1/sessions/{SESSION_ID}/messages` (using the **Session ID** obtained in step 2 in the URL path):
+    ```bash
+    curl -X 'POST' \
+      'http://localhost:8000/api/v1/sessions/YOUR_ACTUAL_SESSION_ID_HERE/messages' \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -d '{
+      "content": "Tell me about the magic shop.",
+      "role": "user"
+    }'
+    ```
+
+So, please create a new session first (linking the document ID if you want RAG) and use the resulting *session ID* in the URL when posting messages.
+
+The core functionality seems solid now! Shall we move on to the final planned piece: the **System Status API**?
+
+INFO:     127.0.0.1:56920 - "GET /api/v1/sessions/?skip=0&limit=50 HTTP/1.1" 200 OK
+INFO:app.api.endpoints.sessions:Created new session with ID: a135debd-92bf-4f29-9c2e-bde6d2fa20b8, Name: magic
+INFO:     127.0.0.1:60324 - "POST /api/v1/sessions/ HTTP/1.1" 201 Created
+INFO:app.api.endpoints.sessions:Created new session with ID: e1ee7929-aab5-40d8-a703-c3f2f98ae25d, Name: magic session
+INFO:     127.0.0.1:52226 - "POST /api/v1/sessions/ HTTP/1.1" 201 Created
+INFO:app.api.endpoints.sessions:[Session:e1ee7929-aab5-40d8-a703-c3f2f98ae25d] Stored user message (ID: 23).
+INFO:app.api.endpoints.sessions:[Session:e1ee7929-aab5-40d8-a703-c3f2f98ae25d] Performing RAG search within documents: ['e3a399ac-ed0f-4850-99fe-6df12c3a1ed3']
+INFO:services.embedding_service:Generating embeddings for 1 text chunks...
+INFO:services.embedding_service:Generated and converted 1 embeddings in 0.02 seconds.
+INFO:app.api.endpoints.sessions:[Session:e1ee7929-aab5-40d8-a703-c3f2f98ae25d] Retrieved 3 chunks for RAG context.
+INFO:app.api.endpoints.sessions:[Session:e1ee7929-aab5-40d8-a703-c3f2f98ae25d] Retrieved last 1 messages for history.
+INFO:app.api.endpoints.sessions:[Session:e1ee7929-aab5-40d8-a703-c3f2f98ae25d] Sending prompt to LLM 'gpt2'...
+INFO:services.llm_service:Generating text with LLM...
+Setting `pad_token_id` to `eos_token_id`:50256 for open-end generation.
+This is a friendly reminder - the current text generation call will exceed the model's predefined maximum length (1024). Depending on the model, you may observe exceptions, performance degradation, or nothing at all.
+/opt/conda/conda-bld/pytorch_1729647352509/work/aten/src/ATen/native/cuda/Indexing.cu:1255: indexSelectSmallIndex: block: [0,0,0], thread: [64,0,0] Assertion `srcIndex < srcSelectDimSize` failed.
+/opt/conda/conda-bld/pytorch_1729647352509/work/aten/src/ATen/native/cuda/Indexing.cu:1255: indexSelectSmallIndex: block: [0,0,0], thread: [65,0,0] Assertion `srcIndex < srcSelectDimSize` failed.
+/opt/conda/conda-bld/pytorch_1729647352509/work/aten/src/ATen/native/cuda/Indexing.cu:1255: indexSelectSmallIndex: block: [0,0,0], thread: [66,0,0] Assertion `srcIndex < srcSelectDimSize` failed.
+/opt/conda/conda-bld/pytorch_1729647352509/work/aten/src/ATen/native/cuda/Indexing.cu:1255: indexSelectSmallIndex: block: [0,0,0], thread: [67,0,0] Assertion `srcIndex < srcSelectDimSize` failed.
+/opt/conda/conda-bld/pytorch_1729647352509/work/aten/src/ATen/native/cuda/Indexing.cu:1255: indexSelectSmallIndex: block: [0,0,0], thread: [68,0,0] Assertion `srcIndex < srcSelectDimSize` failed.
+
+
+.......more of the same......
+
+
+File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/models/gpt2/modeling_gpt2.py", line 1062, in forward
+    transformer_outputs = self.transformer(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/models/gpt2/modeling_gpt2.py", line 829, in forward
+    attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py", line 378, in _prepare_4d_causal_attention_mask_for_sdpa
+    ignore_causal_mask = AttentionMaskConverter._ignore_causal_mask_sdpa(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py", line 288, in _ignore_causal_mask_sdpa
+    elif not is_tracing and torch.all(attention_mask == 1):
+RuntimeError: CUDA error: device-side assert triggered
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+ERROR:app.api.endpoints.sessions:[Session:e1ee7929-aab5-40d8-a703-c3f2f98ae25d] LLM generation failed: Exception: LLM generation failed or returned None.
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server/app/api/endpoints/sessions.py", line 385, in add_message_to_session
+    raise Exception("LLM generation failed or returned None.")
+Exception: LLM generation failed or returned None.
+INFO:app.api.endpoints.sessions:[Session:e1ee7929-aab5-40d8-a703-c3f2f98ae25d] Stored assistant message (ID: 24).
+
+Okay, this is a `RuntimeError: CUDA error: device-side assert triggered`. This is a lower-level error happening *during* the model's computation on the GPU, often related to indexing issues or mismatches in tensor shapes/sizes.
+
+**Analysis:**
+
+1.  **RAG Worked:** The logs show the RAG search retrieved 3 chunks successfully (`Retrieved 3 chunks for RAG context.`).
+2.  **Prompt Length Warning:**
+    ```
+    Setting `pad_token_id` to `eos_token_id`:50256 for open-end generation.
+    This is a friendly reminder - the current text generation call will exceed the model's predefined maximum length (1024). Depending on the model, you may observe exceptions, performance degradation, or nothing at all.
+    ```
+    This is a **major clue**. The combined length of the prompt (Instructions + RAG Context + Chat History + User Query) is longer than the maximum sequence length that `gpt2` can handle (which is 1024 tokens).
+3.  **CUDA Assert:** The subsequent `CUDA error: device-side assert triggered` lines (specifically the `Assertion srcIndex < srcSelectDimSize failed.` related to indexing) are very likely a *direct consequence* of trying to process an input sequence longer than the model was designed for. The model's internal mechanisms (like attention masks or positional embeddings) are failing because the input indices go out of bounds.
+4.  **Failure Path:** The CUDA error causes the `pipeline()` call to fail, which is caught by our `try...except` block in `generate_text`, which returns `None`. This `None` is then caught by the `try...except` in `add_message_to_session`, leading to the `Exception: LLM generation failed or returned None.` being raised and logged, and the error message being stored in the assistant response.
+
+**Solution:**
+
+We need to ensure the prompt we send to the LLM does not exceed its maximum context length. `gpt2`'s limit is 1024 tokens.
+
+1.  **Tokenization Awareness:** We need to use the model's tokenizer to count tokens accurately, not just characters.
+2.  **Context Truncation:** We need a strategy to shorten the prompt if it's too long. Common strategies include:
+    *   Truncating the RAG context (keeping the most relevant chunks, perhaps based on ChromaDB distance).
+    *   Truncating the chat history (keeping only the most recent messages).
+    *   A combination of both.
+
+**Implementation Steps:**
+
+**A. Get the Tokenizer in `llm_service`:**
+
+Modify `llm_state` and the loading task to also store the tokenizer.
+
+```python
+# services/llm_service.py
+# ... (imports) ...
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase # Import tokenizer base class
+
+# ... (LLMStatus Enum) ...
+
+llm_state: Dict[str, Any] = {
+    "pipeline": None,
+    "tokenizer": None, # <-- ADDED: Store the tokenizer
+    "model_name_or_path": None,
+    "status": LLMStatus.NOT_LOADED,
+    "config": { # Generation config
+        # ...
+    },
+    "load_error": None,
+    "load_config": {},
+    "max_model_length": None # <-- ADDED: Store max length
+}
+
+# ... (list_local_models, list_cached_hub_models) ...
+
+async def _load_model_task(model_id: str, device: str, quantization: Optional[str]):
+    global llm_state
+    # ... (start of task, unload logic) ...
+    logger.info(f"Starting model loading task for '{model_id}'...") # Moved log slightly earlier
+
+    # --- Set Loading Status ---
+    llm_state["status"] = LLMStatus.LOADING
+    llm_state["model_name_or_path"] = model_id
+    llm_state["load_error"] = None
+    llm_state["load_config"] = {"device": device, "quantization": quantization}
+    llm_state["tokenizer"] = None # Reset tokenizer
+    llm_state["pipeline"] = None # Reset pipeline
+    llm_state["max_model_length"] = None # Reset max length
+
+
+    try:
+        load_start_time = time.time()
+        # ... (quantization logic) ...
+
+        # --- Load Tokenizer explicitly first ---
+        logger.info(f"Loading tokenizer for '{model_id}'...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve())
+        )
+        logger.info("Tokenizer loaded.")
+
+        # --- Load Model/Pipeline ---
+        logger.info(f"Initializing pipeline with: model='{model_id}', device_map='{pipeline_device_map}', quantization_config={'Set' if quantization_config else 'None'}")
+        # Pass the loaded tokenizer to the pipeline
+        new_pipeline = pipeline(
+            task="text-generation",
+            model=model_id,
+            tokenizer=tokenizer, # <-- Pass loaded tokenizer
+            device_map=pipeline_device_map,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            quantization_config=quantization_config,
+            trust_remote_code=True,
+        )
+
+        load_time = time.time() - load_start_time
+        logger.info(f"Successfully loaded model '{model_id}' in {load_time:.2f} seconds.")
+
+        # --- Get and store max length ---
+        max_len = getattr(new_pipeline.model.config, "max_position_embeddings", None) \
+                  or getattr(new_pipeline.tokenizer, "model_max_length", None) \
+                  or 1024 # Fallback if not found (common for gpt2)
+        logger.info(f"Determined model max length: {max_len}")
+
+        # --- Update state ---
+        llm_state["pipeline"] = new_pipeline
+        llm_state["tokenizer"] = tokenizer # Store tokenizer
+        llm_state["status"] = LLMStatus.LOADED
+        llm_state["load_error"] = None
+        llm_state["max_model_length"] = max_len # Store max length
+        llm_state["config"] = { # Reset generation config
+            # ...
+        }
+
+    except Exception as e:
+        # ... (error handling, make sure to clear state fields like tokenizer)
+        llm_state["pipeline"] = None
+        llm_state["tokenizer"] = None
+        llm_state["max_model_length"] = None
+        # ...
+    # ... (finally block) ...
+
+# ... (generate_text - no changes needed here yet) ...
+```
+*   Added `tokenizer` and `max_model_length` to `llm_state`.
+*   Load the `tokenizer` explicitly *before* the `pipeline`.
+*   Pass the loaded `tokenizer` to the `pipeline` call.
+*   Try to determine the `max_model_length` from the model config or tokenizer config, falling back to 1024. Store it in the state.
+
+**B. Implement Prompt Truncation in `add_message_to_session`:**
+
+Modify the prompt construction logic in `app/api/endpoints/sessions.py` to use the tokenizer and truncate if necessary.
+
+```python
+# app/api/endpoints/sessions.py
+# ... (imports, including LLMStatus, get_llm_status) ...
+# Import the tokenizer type hint if needed (optional)
+# from transformers import PreTrainedTokenizerBase
+
+# ... (router, helper, other endpoints) ...
+
+@router.post(
+    "/{session_id}/messages",
+    # ... (decorator arguments) ...
+)
+async def add_message_to_session(
+    session_id: str,
+    message_data: MessageCreateRequest,
+):
+    # ... (message validation, get session, store user message) ...
+
+    # --- Perform RAG Search (Keep as is) ---
+    # ... (gets rag_context, rag_chunk_ids) ...
+
+    # --- Retrieve Chat History (Keep as is) ---
+    # ... (gets chat_history_str) ...
+
+    # --- ### MODIFIED SECTION: Construct & Truncate Prompt ### ---
+    logger.info("Constructing prompt for LLM...")
+
+    # Get necessary info from LLM state
+    llm_status_data = get_llm_status()
+    tokenizer = llm_state.get("tokenizer") # Get tokenizer object from state
+    max_length = llm_state.get("max_model_length")
+    model_name = llm_status_data.get("model_name_or_path", "N/A")
+
+    if llm_status_data["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
+        # Handle case where LLM/tokenizer isn't ready (though should be checked before generation too)
+        logger.error(f"LLM/Tokenizer not ready for prompt construction. Status: {llm_status_data['status']}")
+        # Cannot proceed with prompt construction, maybe store error message?
+        # For now, we'll let the later check handle the generation block.
+        prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
+
+    else:
+        # --- Define Prompt Components ---
+        # Estimate tokens needed for instruction, markers, query, and response buffer
+        # This is an approximation; actual token count depends on specific words.
+        instruction_text = "You are a helpful AI assistant. Respond to the user's query based on the provided context and chat history."
+        user_query_text = user_message_content
+        # Reserve tokens for instruction, markers, query, and some buffer for the response itself
+        # Let's reserve ~150 tokens for non-context/history parts + response buffer
+        # And also account for the model's requested max_new_tokens
+        generation_config = llm_status_data.get("generation_config", {})
+        max_new_tokens = generation_config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS)
+        reserved_tokens = 150 + max_new_tokens
+        max_context_history_tokens = max_length - reserved_tokens
+        logger.info(f"Max Length: {max_length}, Reserved: {reserved_tokens}, Available for Context/History: {max_context_history_tokens}")
+
+        # --- Tokenize and Truncate Components ---
+        # 1. RAG Context: Truncate if needed
+        rag_context_tokens = []
+        if rag_context and rag_context != "[RAG search failed]":
+            rag_context_tokens = tokenizer.encode(f"\n### CONTEXT:\n{rag_context}", add_special_tokens=False)
+            if len(rag_context_tokens) > max_context_history_tokens:
+                logger.warning(f"Truncating RAG context ({len(rag_context_tokens)} tokens) to fit limit.")
+                rag_context_tokens = rag_context_tokens[:max_context_history_tokens]
+                # Optional: Decode back to string to see truncated context? Might be slow.
+                # rag_context = tokenizer.decode(rag_context_tokens) # Use truncated context text
+
+        available_tokens_for_history = max_context_history_tokens - len(rag_context_tokens)
+
+        # 2. Chat History: Truncate from the OLDEST messages if needed
+        chat_history_tokens = []
+        if chat_history_str:
+            # Start with full history prompt part
+            full_history_prompt = f"\n### CHAT HISTORY:\n{chat_history_str}"
+            chat_history_tokens = tokenizer.encode(full_history_prompt, add_special_tokens=False)
+            if len(chat_history_tokens) > available_tokens_for_history:
+                 logger.warning(f"Truncating chat history ({len(chat_history_tokens)} tokens) to fit limit.")
+                 # Simple truncation: keep only the last N tokens
+                 chat_history_tokens = chat_history_tokens[-available_tokens_for_history:]
+                 # More robust: Re-tokenize messages one by one from recent to old until limit hit? Too complex for now.
+
+        # --- Assemble Final Prompt (using tokens is safer, but harder to format) ---
+        # For simplicity, let's assemble with potentially truncated *strings* derived from tokens
+        # NOTE: Decoding tokens back to strings might introduce slight changes / tokenization artifacts.
+        # A more advanced method would keep everything as token IDs until the final input.
+
+        final_prompt_parts = []
+        final_prompt_parts.append("### INSTRUCTION:")
+        final_prompt_parts.append(instruction_text)
+
+        if rag_context_tokens:
+             # Decode the potentially truncated RAG context tokens
+             decoded_rag_context_header = tokenizer.decode(tokenizer.encode("\n### CONTEXT:", add_special_tokens=False))
+             decoded_rag_context_body = tokenizer.decode(rag_context_tokens[len(tokenizer.encode(decoded_rag_context_header, add_special_tokens=False)):])
+             final_prompt_parts.append(decoded_rag_context_header + decoded_rag_context_body)
+
+
+        if chat_history_tokens:
+            # Decode the potentially truncated chat history tokens
+            decoded_hist_header = tokenizer.decode(tokenizer.encode("\n### CHAT HISTORY:", add_special_tokens=False))
+            decoded_hist_body = tokenizer.decode(chat_history_tokens[len(tokenizer.encode(decoded_hist_header, add_special_tokens=False)):])
+            final_prompt_parts.append(decoded_hist_header + decoded_hist_body)
+
+
+        final_prompt_parts.append("\n### USER QUERY:")
+        final_prompt_parts.append(user_query_text)
+        final_prompt_parts.append("\n### RESPONSE:")
+
+        prompt_for_llm = "\n".join(final_prompt_parts)
+
+        # Final Token Check (Optional but recommended)
+        final_tokens = tokenizer.encode(prompt_for_llm)
+        final_token_count = len(final_tokens)
+        logger.info(f"Constructed final prompt with {final_token_count} tokens (Max allowed for input: {max_length - max_new_tokens}).")
+        if final_token_count >= max_length:
+            # This shouldn't happen often with the truncation, but as a safeguard:
+            logger.error(f"FATAL: Final prompt ({final_token_count} tokens) still exceeds model max length ({max_length}). Truncating forcefully.")
+            # Forcefully truncate the token list (might cut mid-word)
+            truncated_tokens = final_tokens[:max_length - 5] # Leave a tiny buffer
+            prompt_for_llm = tokenizer.decode(truncated_tokens)
+            logger.debug(f"Forcefully truncated prompt:\n{prompt_for_llm}")
+
+
+    logger.debug(f"[Session:{session_id}] Constructed prompt for LLM (Token Count: {final_token_count if 'final_token_count' in locals() else 'N/A'}):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}")
+    # --- ### END MODIFIED SECTION ### ---
+
+
+    # --- Call LLM Service (Keep as is, uses prompt_for_llm) ---
+    # ... (check status, run_in_executor(generate_text, prompt_for_llm), handle response/error) ...
+
+    # --- Store Assistant Message (Keep as is) ---
+    # ... (store response/error, update session timestamp, return result) ...
+
+# ... (list_messages_in_session) ...
+```
+
+**Key Changes in `add_message_to_session`:**
+
+1.  **Get Tokenizer/Max Length:** Fetches the loaded `tokenizer` object and `max_model_length` from the `llm_state`.
+2.  **Calculate Available Space:** Determines the maximum tokens available for RAG context and chat history by subtracting an estimated token count for instructions, markers, the user query, and the `max_new_tokens` setting from the model's `max_length`.
+3.  **Tokenize and Truncate:**
+    *   Tokenizes the RAG context (with its marker). If it exceeds the total available space, it's truncated (keeping the beginning).
+    *   Calculates remaining space for history.
+    *   Tokenizes the Chat History (with its marker). If it exceeds the remaining space, it's truncated (keeping the *end*, i.e., the most recent history).
+4.  **Reassemble Prompt:** Reconstructs the `prompt_for_llm` string using the potentially truncated components (by decoding the truncated token lists back to strings - this is simpler but less precise than manipulating token IDs directly).
+5.  **Final Token Check:** Performs a final check on the assembled prompt string's token count as a safeguard against exceeding the limit due to tokenization nuances. If it still exceeds, it performs a hard truncation on the token list.
+
+**After Applying Fixes:**
+
+1.  Save both modified files (`llm_service.py` and `sessions.py`).
+2.  Restart Uvicorn.
+3.  Load `gpt2`.
+4.  Create a session **with** the RAG document linked (`rag_document_ids: ["e3a3..."]`).
+5.  Send a message that requires the RAG context (e.g., "Tell me about the magic shop.").
+6.  Check the logs:
+    *   You should see the token calculation (`Available for Context/History: ...`).
+    *   You might see warnings about truncating context or history if they were too long.
+    *   You should see the final token count log message.
+    *   The CUDA assertion error should be gone.
+    *   The LLM should now generate a response based on the (potentially truncated) prompt that fits within its context limit.
+
+This adds essential context length management, preventing the common CUDA errors associated with exceeding the model's maximum sequence length. Let me know the results!
+
+"instead of truncating, can we summarize the chunks first to reduce the content to key topics and other data and then combine them and then truncate?"
+
+Yes, that's an excellent refinement and a common strategy in more sophisticated RAG pipelines! Instead of just truncating potentially valuable context, summarizing the retrieved chunks first allows you to condense the information before combining and potentially truncating the *summaries*. This often preserves more relevant meaning within the token limit.
+
+**Concept:**
+
+1.  **Retrieve:** Perform semantic search as before to get the top-k relevant chunks (`retrieved_docs`).
+2.  **Summarize:** For each retrieved chunk, use an LLM (either the currently loaded one or potentially a dedicated, faster summarization model) to generate a concise summary. It's often helpful to include the original user query in the summarization prompt to make the summary more relevant.
+3.  **Combine:** Concatenate these summaries into a single `rag_context_summarized` string.
+4.  **Truncate (if needed):** Apply the tokenization and truncation logic (as implemented in the previous step) to the combination of `rag_context_summarized` and `chat_history_str` to ensure it fits the final prompt limit.
+5.  **Construct Final Prompt:** Use the (potentially truncated) summaries and history.
+
+**Implementation Strategy (Using Current LLM):**
+
+We'll modify the flow to include calls to our `generate_text` function *within* the loop that processes retrieved chunks. This will increase latency as we're making multiple LLM calls per user request.
+
+**1. Add Summarization Helper Function (in `services/llm_service.py`)**
+
+Let's create a function specifically for summarizing. It will use the existing `generate_text`.
+
+```python
+# services/llm_service.py
+# ... (imports, other functions, including generate_text) ...
+
+# --- NEW: Summarization Function ---
+# This function will run within the main request thread or executor if called from there.
+# Consider making it async if generate_text becomes truly async later.
+def summarize_text_with_query(text_to_summarize: str, user_query: str, max_summary_tokens: int = 100) -> Optional[str]:
+    """
+    Uses the loaded LLM to summarize text, guided by a user query.
+    NOTE: This makes an additional LLM call.
+    """
+    if llm_state["status"] != LLMStatus.LOADED or llm_state["pipeline"] is None:
+        logger.error("LLM not loaded, cannot summarize.")
+        return None
+
+    # Construct a specific prompt for summarization
+    summarization_prompt = f"""### INSTRUCTION:
+Concisely summarize the following text, focusing on aspects relevant to the user query. Output only the summary.
+
+### USER QUERY:
+{user_query}
+
+### TEXT TO SUMMARIZE:
+{text_to_summarize}
+
+### SUMMARY:""" # Model generates after this
+
+    # Use a subset of generation config, perhaps make it less creative?
+    # Override some settings for summarization - less random, shorter output.
+    original_config = llm_state["config"].copy() # Store original config
+    summary_config_override = {
+        "temperature": 0.3, # Less creative for summary
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_new_tokens": max_summary_tokens, # Limit summary length
+    }
+
+    logger.info(f"Requesting summarization for query '{user_query[:30]}...'")
+    logger.debug(f"Summarization Prompt:\n{summarization_prompt[:200]}...")
+
+    # Temporarily update config for this call (if needed, or pass overrides if generate_text supports it)
+    # Simpler approach for now: modify state, generate, restore state.
+    # WARNING: This is NOT thread-safe if multiple requests modify config simultaneously!
+    # A better approach would be to pass overrides to generate_text if possible,
+    # or use a dedicated summarization pipeline/model.
+    temp_config = original_config.copy()
+    temp_config.update(summary_config_override)
+    llm_state["config"] = temp_config # Temporarily set summary config
+
+    summary = None
+    try:
+        # Assuming generate_text uses llm_state["config"]
+        summary = generate_text(summarization_prompt) # Call existing generation function
+    finally:
+        # CRITICAL: Restore original generation config
+        llm_state["config"] = original_config
+
+    if summary:
+        logger.info("Summarization successful.")
+        logger.debug(f"Generated Summary: {summary}")
+        return summary.strip()
+    else:
+        logger.error("Summarization failed.")
+        return None
+
+# ... (rest of llm_service.py) ...
+```
+*   **Warning:** The temporary modification of `llm_state["config"]` is **not thread-safe**. If you have concurrent requests, they might interfere with each other's generation settings. Proper handling would involve passing generation parameters directly to `generate_text` or using separate pipelines. For now, we proceed with this simpler (but flawed for concurrency) approach.
+*   Creates a dedicated prompt.
+*   Uses different (less creative) generation parameters suitable for summarization.
+*   Calls the existing `generate_text` function.
+*   Restores the original generation config in a `finally` block.
+
+**2. Modify `add_message_to_session` (in `app/api/endpoints/sessions.py`)**
+
+Integrate the call to `summarize_text_with_query`.
+
+```python
+# app/api/endpoints/sessions.py
+# ... (imports) ...
+# Import the new summarization function
+from services.llm_service import generate_text, get_llm_status, LLMStatus, summarize_text_with_query
+
+# ... (router, helper, other endpoints) ...
+
+@router.post(
+    "/{session_id}/messages",
+    # ... (decorator) ...
+)
+async def add_message_to_session(
+    session_id: str,
+    message_data: MessageCreateRequest,
+):
+    # ... (message validation, get session, store user message) ...
+    user_query = message_data.content # Store user query for summarization prompt
+
+    # --- Perform RAG Search (Gets retrieved_docs, retrieved_metadatas, retrieved_ids) ---
+    # ... (RAG search logic remains the same) ...
+
+    # --- ### NEW: Summarize Retrieved Chunks ### ---
+    summarized_context_parts = []
+    if rag_document_ids_in_session and retrieved_docs: # Check if we have docs to summarize
+        logger.info(f"Summarizing {len(retrieved_docs)} retrieved chunks...")
+        loop = asyncio.get_running_loop()
+
+        # Summarize sequentially for simplicity (can be parallelized with gather later)
+        for i, chunk_text in enumerate(retrieved_docs):
+            metadata = retrieved_metadatas[i] if i < len(retrieved_metadatas) else {}
+            source_info = f"Source(Doc: {metadata.get('document_id', 'N/A')}, Chunk: {metadata.get('chunk_index', 'N/A')})"
+
+            try:
+                # Run blocking summarization call (which includes LLM call) in executor
+                summary = await loop.run_in_executor(
+                    None, # Default executor
+                    summarize_text_with_query, # Function to run
+                    chunk_text, # Argument 1
+                    user_query, # Argument 2
+                    150 # Argument 3: max_summary_tokens (adjust as needed)
+                )
+
+                if summary:
+                    summarized_context_parts.append(f"{source_info}:\n{summary}")
+                else:
+                    logger.warning(f"Failed to summarize chunk {i} from doc {metadata.get('document_id', 'N/A')}. Skipping.")
+                    # Optionally include original chunk or placeholder?
+                    # summarized_context_parts.append(f"{source_info}:\n[Summarization Failed]")
+
+            except Exception as summary_err:
+                 logger.error(f"Error during summarization executor call for chunk {i}: {summary_err}", exc_info=True)
+                 # summarized_context_parts.append(f"{source_info}:\n[Summarization Error]")
+
+
+        rag_context = "\n\n---\n\n".join(summarized_context_parts) # Rebuild rag_context from summaries
+        logger.info(f"Finished summarizing chunks. Combined summary length: {len(rag_context)} chars.")
+        if not rag_context:
+             rag_context = "[RAG Summarization resulted in empty context]"
+
+    # If RAG wasn't run or failed initially, rag_context might still be the error string or empty
+    elif not rag_document_ids_in_session:
+        logger.info(f"[Session:{session_id}] No RAG document IDs associated. Skipping RAG search & summarization.")
+        rag_context = "" # Ensure it's empty if no docs linked
+    # --- ### END SUMMARIZATION STEP ### ---
+
+
+    # --- Retrieve Chat History (Keep as is) ---
+    # ... (gets chat_history_str) ...
+
+    # --- Construct & Truncate Prompt (MODIFIED TO USE SUMMARIZED CONTEXT) ---
+    logger.info("Constructing final prompt using summarized context...")
+    llm_status_data = get_llm_status()
+    tokenizer = llm_state.get("tokenizer")
+    max_length = llm_state.get("max_model_length")
+    model_name = llm_status_data.get("model_name_or_path", "N/A")
+
+    if llm_status_data["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
+        prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
+    else:
+        # --- Define Prompt Components ---
+        instruction_text = "You are a helpful AI assistant. Respond to the user's query based on the provided context and chat history."
+        user_query_text = user_message_content # Renamed from message_data.content for clarity
+        generation_config = llm_status_data.get("generation_config", {})
+        max_new_tokens = generation_config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS)
+        reserved_tokens = 150 + max_new_tokens # Rough estimate
+        max_context_history_tokens = max_length - reserved_tokens
+        logger.info(f"Max Length: {max_length}, Reserved: {reserved_tokens}, Available for Summarized Context/History: {max_context_history_tokens}")
+
+        # --- Tokenize and Truncate SUMMARIZED Components ---
+        # 1. SUMMARIZED RAG Context: Truncate if needed (summaries might still be long combined)
+        rag_context_tokens = []
+        if rag_context and "[ERROR" not in rag_context and "[Summarization" not in rag_context: # Check context is valid
+            rag_context_prompt_part = f"\n### CONTEXT:\n{rag_context}"
+            rag_context_tokens = tokenizer.encode(rag_context_prompt_part, add_special_tokens=False)
+            if len(rag_context_tokens) > max_context_history_tokens:
+                logger.warning(f"Truncating SUMMARIZED RAG context ({len(rag_context_tokens)} tokens) to fit limit.")
+                rag_context_tokens = rag_context_tokens[:max_context_history_tokens]
+
+        available_tokens_for_history = max_context_history_tokens - len(rag_context_tokens)
+
+        # 2. Chat History: Truncate from the OLDEST if needed
+        chat_history_tokens = []
+        if chat_history_str and available_tokens_for_history > 0: # Only add history if space allows
+            full_history_prompt = f"\n### CHAT HISTORY:\n{chat_history_str}"
+            chat_history_tokens = tokenizer.encode(full_history_prompt, add_special_tokens=False)
+            if len(chat_history_tokens) > available_tokens_for_history:
+                 logger.warning(f"Truncating chat history ({len(chat_history_tokens)} tokens) to fit limit ({available_tokens_for_history}).")
+                 chat_history_tokens = chat_history_tokens[-available_tokens_for_history:]
+
+        # --- Assemble Final Prompt ---
+        # (Assemble using decoded tokens as before)
+        final_prompt_parts = []
+        # ... (instruction) ...
+        if rag_context_tokens:
+            # Decode potentially truncated summarized context
+            # ... (decode rag context tokens) ...
+            decoded_rag_context_header = tokenizer.decode(tokenizer.encode("\n### CONTEXT:", add_special_tokens=False))
+            # Adjust index based on header length for body decoding
+            header_token_len = len(tokenizer.encode(decoded_rag_context_header, add_special_tokens=False))
+            decoded_rag_context_body = tokenizer.decode(rag_context_tokens[header_token_len:])
+            final_prompt_parts.append(decoded_rag_context_header + decoded_rag_context_body)
+
+        if chat_history_tokens:
+            # Decode potentially truncated history
+            # ... (decode history tokens) ...
+             decoded_hist_header = tokenizer.decode(tokenizer.encode("\n### CHAT HISTORY:", add_special_tokens=False))
+             header_token_len = len(tokenizer.encode(decoded_hist_header, add_special_tokens=False))
+             decoded_hist_body = tokenizer.decode(chat_history_tokens[header_token_len:])
+             final_prompt_parts.append(decoded_hist_header + decoded_hist_body)
+
+        # ... (user query, response marker) ...
+        final_prompt_parts.append("\n### USER QUERY:")
+        final_prompt_parts.append(user_query_text)
+        final_prompt_parts.append("\n### RESPONSE:")
+
+        prompt_for_llm = "\n".join(final_prompt_parts)
+
+        # --- Final Token Check (Keep as is) ---
+        # ... (check final tokens, log, hard truncate if necessary) ...
+
+    # logger.debug(...) # Keep final prompt log
+
+    # --- Call LLM Service (using the prompt_for_llm containing summaries) ---
+    # ... (LLM call logic remains the same) ...
+
+    # --- Store Assistant Message (logic remains the same) ---
+    # ... (store message, update timestamp, return response) ...
+
+```
+
+**Key Changes in `add_message_to_session`:**
+
+1.  **Summarization Loop:** After retrieving chunks, it loops through them.
+2.  **Executor for Summarization:** Each call to `summarize_text_with_query` (which itself calls the blocking `generate_text`) is wrapped in `loop.run_in_executor` to avoid blocking the main loop for each summary.
+3.  **Context Rebuild:** The `rag_context` variable is rebuilt using the *summaries* returned from the helper function. Error handling is added for summarization failures.
+4.  **Truncation Logic:** The existing token counting and truncation logic now operates on the potentially shorter, summarized `rag_context`.
+
+**Trade-offs & Considerations:**
+
+*   **Latency:** This *will* be noticeably slower because you're making `N+1` LLM calls (N summaries + 1 final response) instead of just 1.
+*   **Concurrency Issue:** As noted, modifying the shared `llm_state["config"]` within `summarize_text_with_query` is not safe for concurrent requests. A production system would need parameter passing or separate pipelines.
+*   **Summarization Quality:** The effectiveness depends entirely on how well the LLM summarizes based on the prompt. You might need to tune the summarization prompt or parameters.
+*   **Alternative:** A dedicated, smaller/faster summarization model would be more efficient.
+
+**Testing:**
+
+1.  Save both modified files.
+2.  Restart Uvicorn.
+3.  Load an LLM (e.g., `gpt2`).
+4.  Create a session linked to a document with sufficient text (like `the magic shop.txt`).
+5.  Send a query relevant to the document.
+6.  **Observe Logs Carefully:** Look for the "Summarizing X retrieved chunks..." messages, the individual summarization logs (prompt, result), the combined summary length, and the final prompt construction/token count logs.
+7.  **Check Response:** The final LLM response should now be based on the *summaries* of the relevant chunks, potentially providing a more coherent answer if the original context was too long.
+8.  **Note Latency:** Compare the time it takes to get a response compared to the previous version without summarization.
+
+This implements the summarization step. Let me know if it works and how the results look!
+
+are the python indents all correct for this updated sessions.py
+
+# app/api/endpoints/sessions.py
+import uuid
+import logging
+import datetime
+import asyncio
+from typing import List, Optional
+
+from fastapi import APIRouter, HTTPException, Depends, status
+
+# Import models and db access
+from app.api.models.chat import (
+    SessionCreateRequest,
+    SessionMetadataResponse,
+    MessageCreateRequest,
+    ChatMessageResponse
+)
+
+# --- MODIFIED IMPORTS ---
+from db.database import database, get_chroma_client # Import Chroma client getter
+from db.models import sessions_table, chat_messages_table, documents_table
+from core.config import settings
+# Import embedding and search functions/models if needed directly
+from services.embedding_service import generate_embeddings
+# Import LLM service functions and status
+from services.llm_service import generate_text, get_llm_status, LLMStatus
+# --- END MODIFIED IMPORTS ---
+from app.api.endpoints.documents import SearchQuery
+import sqlalchemy
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# --- Helper Function (Optional but recommended for validation) ---
+async def get_session_or_404(session_id: str) -> dict:
+    """Fetches session metadata or raises HTTPException 404."""
+    query = sessions_table.select().where(sessions_table.c.id == session_id)
+    session = await database.fetch_one(query)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session with ID '{session_id}' not found.")
+
+    # Ensure JSON fields are parsed (databases library might return strings)
+    # Example for rag_document_ids (assuming it's stored as JSON string):
+    # if isinstance(session_dict.get("rag_document_ids"), str):
+    #     try:
+    #         session_dict["rag_document_ids"] = json.loads(session_dict["rag_document_ids"])
+    #     except json.JSONDecodeError:
+    #         logger.warning(f"Could not decode rag_document_ids JSON for session {session_id}")
+    #         session_dict["rag_document_ids"] = None # Or handle as error
+
+    # Note: SQLAlchemy's JSON type with 'databases' might handle this automatically depending on dialect/setup.
+    # Let's assume it returns a list/dict directly for now.
+
+    return dict(session) # Convert RowProxy to dict
+
+# --- Session Endpoints ---
+
+@router.post(
+    "/",
+    response_model=SessionMetadataResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new chat session",
+)
+async def create_session(
+    session_data: SessionCreateRequest,
+):
+    """
+    Starts a new chat session, optionally associating RAG documents.
+    """
+    session_id = str(uuid.uuid4())
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    # TODO: Validate if rag_document_ids actually exist in documents table?
+    # For now, assume they are valid if provided.
+
+    insert_query = sessions_table.insert().values(
+        id=session_id,
+        name=session_data.name,
+        created_at=now,
+        last_updated_at=now,
+        llm_model_name=settings.DEFAULT_MODEL_NAME, # Use default model from settings for now
+        rag_document_ids=session_data.rag_document_ids,
+        metadata_tags=None, # Add logic for automatic tags later
+    )
+    try:
+        await database.execute(insert_query)
+        logger.info(f"Created new session with ID: {session_id}, Name: {session_data.name}")
+        # Fetch the created session to return its data
+        created_session = await get_session_or_404(session_id)
+        return SessionMetadataResponse.parse_obj(created_session)
+    except Exception as e:
+        logger.error(f"Failed to create session: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create session.")
+
+@router.get(
+    "/",
+    response_model=List[SessionMetadataResponse],
+    summary="List existing chat sessions",
+)
+async def list_sessions(
+    skip: int = 0,
+    limit: int = 50,
+):
+    """
+    Retrieves a list of chat sessions, ordered by last update time (most recent first).
+    """
+    query = sessions_table.select().order_by(sessions_table.c.last_updated_at.desc()).offset(skip).limit(limit)
+    try:
+        results = await database.fetch_all(query)
+        return [SessionMetadataResponse.parse_obj(dict(row)) for row in results]
+    except Exception as e:
+        logger.error(f"Failed to list sessions: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve sessions.")
+
+@router.get(
+    "/{session_id}",
+    response_model=SessionMetadataResponse,
+    summary="Get details of a specific session",
+)
+async def get_session(session_id: str):
+    """
+    Retrieves metadata for a single chat session by its ID.
+    """
+    session = await get_session_or_404(session_id)
+    return SessionMetadataResponse.parse_obj(session)
+
+
+@router.delete(
+    "/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a chat session",
+)
+async def delete_session(session_id: str):
+    """
+    Deletes a chat session and all its associated messages.
+    """
+    await get_session_or_404(session_id) # Ensure session exists first
+
+    # Use a transaction to ensure atomicity
+    async with database.transaction():
+        try:
+            # Delete messages associated with the session
+            delete_messages_query = chat_messages_table.delete().where(chat_messages_table.c.session_id == session_id)
+            await database.execute(delete_messages_query)
+
+            # Delete the session itself
+            delete_session_query = sessions_table.delete().where(sessions_table.c.id == session_id)
+            await database.execute(delete_session_query)
+
+            logger.info(f"Deleted session {session_id} and its messages.")
+        except Exception as e:
+            logger.error(f"Failed to delete session {session_id}: {e}", exc_info=True)
+            # Transaction will be rolled back automatically on exception
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete session {session_id}.")
+    return None # Return None for 204 status code
+
+
+# --- Message Endpoints (within a session) ---
+
+@router.post(
+    "/{session_id}/messages",
+    response_model=ChatMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Send a message and get AI response (with RAG)",
+    description="Adds user message, performs RAG search, constructs prompt, calls LLM, "
+                "stores response, and returns the assistant message.",
+)
+
+async def add_message_to_session( # Renamed from post_message for clarity internally
+    session_id: str,
+    message_data: MessageCreateRequest,
+    # chroma_client: chromadb.ClientAPI = Depends(get_chroma_client) # Inject Chroma
+):
+    """
+    Handles user message, RAG, placeholder LLM call, and stores conversation turn.
+    """
+    if message_data.role != "user":
+         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only 'user' role messages can be posted by the client.")
+
+    session = await get_session_or_404(session_id) # Ensure session exists and get its data
+    user_message_content = message_data.content
+    now = datetime.datetime.now(datetime.timezone.utc)
+    chroma_client = get_chroma_client() # Get client directly for now
+
+    # --- Store User Message ---
+    # Use a transaction? Maybe better to store user msg, then do RAG/LLM, then store assistant msg.
+    # Let's store user message immediately first.
+    try:
+        insert_user_message_query = chat_messages_table.insert().values(
+            session_id=session_id,
+            timestamp=now,
+            role="user",
+            content=user_message_content,
+            metadata=None,
+        ).returning(chat_messages_table.c.id)
+        user_message_id = await database.execute(insert_user_message_query)
+        logger.info(f"[Session:{session_id}] Stored user message (ID: {user_message_id}).")
+
+        # Update session timestamp for user message (or wait until assistant message?)
+        # Let's update now to reflect activity immediately.
+        update_session_query = sessions_table.update().where(sessions_table.c.id == session_id).values(
+             last_updated_at=now
+        )
+        await database.execute(update_session_query)
+
+    except Exception as e:
+        logger.error(f"[Session:{session_id}] Failed to store user message: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store user message.")
+
+    """
+    Adds a new message (typically from the user) to a specific chat session.
+    Updates the session's last_updated_at timestamp.
+    **Note:** This endpoint currently only stores the user message.
+             It does NOT generate or store an assistant response yet.
+    """
+    # # Validate role if necessary (e.g., allow only 'user' for now via API?)
+    # if message_data.role not in ["user", "assistant", "system"]: # Adjust allowed roles as needed
+    #      raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid role: {message_data.role}")
+
+
+
+    # --- Perform RAG Search ---
+    rag_context = ""
+    rag_chunk_ids = []
+    rag_document_ids_in_session = session.get("rag_document_ids") # Get associated doc IDs
+
+    if rag_document_ids_in_session:
+        logger.info(f"[Session:{session_id}] Performing RAG search within documents: {rag_document_ids_in_session}")
+        try:
+            doc_collection = chroma_client.get_collection(settings.DOCUMENT_COLLECTION_NAME)
+
+            # 1. Embed the user query
+            query_embedding = generate_embeddings([user_message_content])
+            if not query_embedding or not query_embedding[0]:
+                raise ValueError("Failed to generate query embedding for RAG.")
+
+            # 2. Build ChromaDB filter
+            chroma_where_filter = {
+                # Filter results to only include chunks from the documents linked to this session
+                "document_id": {"$in": rag_document_ids_in_session}
+            }
+            logger.debug(f"[Session:{session_id}] RAG ChromaDB filter: {chroma_where_filter}")
+
+            # 3. Query ChromaDB
+            results = doc_collection.query(
+                query_embeddings=query_embedding,
+                n_results=settings.RAG_TOP_K,
+                where=chroma_where_filter,
+                include=['documents', 'metadatas', 'distances'] # Get text, metadata, distance
+            )
+
+            # 4. Format RAG context
+            retrieved_docs = results.get('documents', [[]])[0]
+            retrieved_metadatas = results.get('metadatas', [[]])[0]
+            retrieved_ids = results.get('ids', [[]])[0] # Get chunk IDs
+
+            if retrieved_docs:
+                rag_chunk_ids = retrieved_ids # Store the IDs of retrieved chunks
+                context_parts = []
+                for i, doc_text in enumerate(retrieved_docs):
+                    metadata = retrieved_metadatas[i] if i < len(retrieved_metadatas) else {}
+                    source_info = f"Source(Doc: {metadata.get('document_id', 'N/A')}, Chunk: {metadata.get('chunk_index', 'N/A')})"
+                    context_parts.append(f"{source_info}:\n{doc_text}")
+                rag_context = "\n\n---\n\n".join(context_parts)
+                logger.info(f"[Session:{session_id}] Retrieved {len(retrieved_docs)} chunks for RAG context.")
+                logger.debug(f"[Session:{session_id}] RAG Context:\n{rag_context[:500]}...") # Log beginning of context
+
+        except Exception as e:
+            logger.error(f"[Session:{session_id}] RAG search failed: {e}", exc_info=True)
+            # Proceed without RAG context, maybe log a warning or add to assistant metadata
+            rag_context = "[RAG search failed]" # Indicate failure in context
+    else:
+         logger.info(f"[Session:{session_id}] No RAG document IDs associated. Skipping RAG search.")
+
+
+    # --- Retrieve Chat History ---
+    chat_history_str = ""
+    try:
+        # Fetch last N messages (user and assistant), ordered oldest first for prompt
+        # N pairs = 2 * N messages. Add 1 to potentially fetch the just-added user message if needed.
+        history_limit = settings.CHAT_HISTORY_LENGTH * 2
+        history_query = chat_messages_table.select().where(
+            chat_messages_table.c.session_id == session_id
+        ).order_by(chat_messages_table.c.timestamp.desc()).limit(history_limit) # Fetch recent, then reverse
+
+        recent_messages = await database.fetch_all(history_query)
+        recent_messages.reverse() # Reverse to get chronological order
+
+        if recent_messages:
+             history_parts = [f"{msg['role'].capitalize()}: {msg['content']}" for msg in recent_messages]
+             # Exclude the very last message if it's the user message we just added?
+             # Let's assume the LLM prompt format handles the current user query separately.
+             chat_history_str = "\n".join(history_parts)
+             logger.info(f"[Session:{session_id}] Retrieved last {len(recent_messages)} messages for history.")
+             logger.debug(f"[Session:{session_id}] Chat History:\n{chat_history_str[-500:]}...") # Log end of history
+
+    except Exception as e:
+        logger.error(f"[Session:{session_id}] Failed to retrieve chat history: {e}", exc_info=True)
+        chat_history_str = "[Failed to retrieve history]"
+
+    # --- Construct Prompt ---
+    logger.info("Constructing prompt for LLM...")
+
+    prompt_parts = []
+
+    prompt_parts.append("### INSTRUCTION:")
+    prompt_parts.append("You are a helpful AI assistant. Respond to the user's query based on the provided context and chat history.")
+
+    if rag_context and rag_context != "[RAG search failed]":
+        prompt_parts.append("\n### CONTEXT:")
+        prompt_parts.append(rag_context)
+
+    if chat_history_str:
+        prompt_parts.append("\n### CHAT HISTORY:")
+        prompt_parts.append(chat_history_str) # History already includes "User:" / "Assistant:"
+
+    prompt_parts.append("\n### USER QUERY:")
+    prompt_parts.append(user_message_content)
+
+    prompt_parts.append("\n### RESPONSE:") # Model should generate text after this marker
+
+    prompt_for_llm = "\n".join(prompt_parts)
+
+    logger.debug(f"[Session:{session_id}] Constructed prompt (first/last 200 chars):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}") 
+
+    assistant_response_content = None
+    assistant_message_metadata = {
+        "prompt_preview": prompt_for_llm[:200] + "...",
+        "rag_chunks_retrieved": rag_chunk_ids,
+        "llm_call_error": None # Add field for potential errors
+    }
+
+    # Check LLM status before attempting generation
+    # Get necessary info from LLM state
+    llm_status_data = get_llm_status()
+    tokenizer = llm_state.get("tokenizer") # Get tokenizer object from state
+    max_length = llm_state.get("max_model_length")
+    model_name = llm_status_data.get("model_name_or_path", "N/A")
+
+    if llm_status["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
+        error_detail = f"LLM not ready (Status: {llm_status['status']}). Please load a model first."
+
+        logger.warning(f"[Session:{session_id}] {error_detail}")
+        logger.error(f"LLM/Tokenizer not ready for prompt construction. Status: {llm_status_data['status']}")
+
+        assistant_response_content = f"[ERROR: {error_detail}]"
+        assistant_message_metadata["llm_call_error"] = error_detail
+
+        prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
+    else:
+        # --- Define Prompt Components ---
+        # Estimate tokens needed for instruction, markers, query, and response buffer
+        # This is an approximation; actual token count depends on specific words.
+        instruction_text = "You are a helpful AI assistant. Respond to the user's query based on the provided context and chat history."
+        user_query_text = user_message_content
+        # Reserve tokens for instruction, markers, query, and some buffer for the response itself
+        # Let's reserve ~150 tokens for non-context/history parts + response buffer
+        # And also account for the model's requested max_new_tokens
+        generation_config = llm_status_data.get("generation_config", {})
+        max_new_tokens = generation_config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS)
+        reserved_tokens = 150 + max_new_tokens
+        max_context_history_tokens = max_length - reserved_tokens
+        logger.info(f"Max Length: {max_length}, Reserved: {reserved_tokens}, Available for Context/History: {max_context_history_tokens}")
+
+        # --- Tokenize and Truncate Components ---
+        # 1. RAG Context: Truncate if needed
+        rag_context_tokens = []
+        if rag_context and rag_context != "[RAG search failed]":
+            rag_context_tokens = tokenizer.encode(f"\n### CONTEXT:\n{rag_context}", add_special_tokens=False)
+            if len(rag_context_tokens) > max_context_history_tokens:
+                logger.warning(f"Truncating RAG context ({len(rag_context_tokens)} tokens) to fit limit.")
+                rag_context_tokens = rag_context_tokens[:max_context_history_tokens]
+                # Optional: Decode back to string to see truncated context? Might be slow.
+                # rag_context = tokenizer.decode(rag_context_tokens) # Use truncated context text
+
+        available_tokens_for_history = max_context_history_tokens - len(rag_context_tokens)
+
+        # 2. Chat History: Truncate from the OLDEST messages if needed
+        chat_history_tokens = []
+        if chat_history_str:
+            # Start with full history prompt part
+            full_history_prompt = f"\n### CHAT HISTORY:\n{chat_history_str}"
+            chat_history_tokens = tokenizer.encode(full_history_prompt, add_special_tokens=False)
+            if len(chat_history_tokens) > available_tokens_for_history:
+                 logger.warning(f"Truncating chat history ({len(chat_history_tokens)} tokens) to fit limit.")
+                 # Simple truncation: keep only the last N tokens
+                 chat_history_tokens = chat_history_tokens[-available_tokens_for_history:]
+                 # More robust: Re-tokenize messages one by one from recent to old until limit hit? Too complex for now.
+
+        # --- Assemble Final Prompt (using tokens is safer, but harder to format) ---
+        # For simplicity, let's assemble with potentially truncated *strings* derived from tokens
+        # NOTE: Decoding tokens back to strings might introduce slight changes / tokenization artifacts.
+        # A more advanced method would keep everything as token IDs until the final input.
+
+        final_prompt_parts = []
+        final_prompt_parts.append("### INSTRUCTION:")
+        final_prompt_parts.append(instruction_text)
+
+        if rag_context_tokens:
+             # Decode the potentially truncated RAG context tokens
+             decoded_rag_context_header = tokenizer.decode(tokenizer.encode("\n### CONTEXT:", add_special_tokens=False))
+             decoded_rag_context_body = tokenizer.decode(rag_context_tokens[len(tokenizer.encode(decoded_rag_context_header, add_special_tokens=False)):])
+             final_prompt_parts.append(decoded_rag_context_header + decoded_rag_context_body)
+
+
+        if chat_history_tokens:
+            # Decode the potentially truncated chat history tokens
+            decoded_hist_header = tokenizer.decode(tokenizer.encode("\n### CHAT HISTORY:", add_special_tokens=False))
+            decoded_hist_body = tokenizer.decode(chat_history_tokens[len(tokenizer.encode(decoded_hist_header, add_special_tokens=False)):])
+            final_prompt_parts.append(decoded_hist_header + decoded_hist_body)
+
+
+        final_prompt_parts.append("\n### USER QUERY:")
+        final_prompt_parts.append(user_query_text)
+        final_prompt_parts.append("\n### RESPONSE:")
+
+        prompt_for_llm = "\n".join(final_prompt_parts)
+
+        # Final Token Check (Optional but recommended)
+        final_tokens = tokenizer.encode(prompt_for_llm)
+        final_token_count = len(final_tokens)
+        logger.info(f"Constructed final prompt with {final_token_count} tokens (Max allowed for input: {max_length - max_new_tokens}).")
+        if final_token_count >= max_length:
+            # This shouldn't happen often with the truncation, but as a safeguard:
+            logger.error(f"FATAL: Final prompt ({final_token_count} tokens) still exceeds model max length ({max_length}). Truncating forcefully.")
+            # Forcefully truncate the token list (might cut mid-word)
+            truncated_tokens = final_tokens[:max_length - 5] # Leave a tiny buffer
+            prompt_for_llm = tokenizer.decode(truncated_tokens)
+            logger.debug(f"Forcefully truncated prompt:\n{prompt_for_llm}")
+
+
+    logger.debug(f"[Session:{session_id}] Constructed prompt for LLM (Token Count: {final_token_count if 'final_token_count' in locals() else 'N/A'}):\n{prompt_for_llm[:200]}...\n...{prompt_for_llm[-200:]}")
+
+    try:
+        logger.info(f"[Session:{session_id}] Sending prompt to LLM '{llm_status['model_name_or_path']}'...")
+        # Run the potentially blocking LLM generation in an executor thread
+        loop = asyncio.get_running_loop()
+        llm_response = await loop.run_in_executor(
+            None,  # Use default ThreadPoolExecutor
+            generate_text, # The function to run
+            prompt_for_llm # The argument(s) for the function
+        )
+
+        if llm_response is None:
+            # Generation failed within the service (error already logged there)
+            raise Exception("LLM generation failed or returned None.")
+
+        assistant_response_content = llm_response
+        logger.info(f"[Session:{session_id}] Received response from LLM.")
+        logger.debug(f"[Session:{session_id}] LLM Response:\n{assistant_response_content[:500]}...")
+
+    except Exception as e:
+        error_detail = f"LLM generation failed: {type(e).__name__}"
+        logger.error(f"[Session:{session_id}] {error_detail}: {e}", exc_info=True)
+        assistant_response_content = f"[ERROR: {error_detail}]"
+        assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}"
+
+
+    # --- Store Assistant Message (Using actual or error response) ---
+    try:
+        assistant_timestamp = datetime.datetime.now(datetime.timezone.utc)
+        insert_assistant_message_query = chat_messages_table.insert().values(
+            session_id=session_id,
+            timestamp=assistant_timestamp,
+            role="assistant",
+            content=assistant_response_content, # Use the actual or error content
+            metadata=assistant_message_metadata, # Include metadata with potential error
+        ).returning(chat_messages_table.c.id, *[c for c in chat_messages_table.c])
+
+        new_assistant_message_row = await database.fetch_one(insert_assistant_message_query)
+        if not new_assistant_message_row:
+            raise Exception("Failed to retrieve assistant message after insert.")
+
+        logger.info(f"[Session:{session_id}] Stored assistant message (ID: {new_assistant_message_row['id']}).")
+
+        # Update session timestamp
+        update_session_query_after_assist = sessions_table.update().where(sessions_table.c.id == session_id).values(
+             last_updated_at=assistant_timestamp
+        )
+        await database.execute(update_session_query_after_assist)
+
+        # Return the structured assistant message response
+        return ChatMessageResponse.parse_obj(dict(new_assistant_message_row))
+
+    except Exception as e:
+        logger.error(f"[Session:{session_id}] Failed to store assistant message: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store assistant response.")
+
+
+# --- List Messages Endpoint (Keep as is) ---
+@router.get(
+    "/{session_id}/messages",
+    response_model=List[ChatMessageResponse],
+    summary="List messages in a session",
+)
+async def list_messages_in_session(
+    session_id: str,
+    skip: int = 0,
+    limit: int = 1000,
+):
+
+
+    await get_session_or_404(session_id) # Ensure session exists
+    query = chat_messages_table.select().where(
+        chat_messages_table.c.session_id == session_id
+    ).order_by(chat_messages_table.c.timestamp.asc()).offset(skip).limit(limit) # Order by ascending time
+    try:
+        results = await database.fetch_all(query)
+        return [ChatMessageResponse.parse_obj(dict(row)) for row in results]
+    except Exception as e:
+        logger.error(f"Failed to list messages for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to retrieve messages for session {session_id}.")
+
+Here's a thinking process for reviewing the Python code for indentation errors:
+
+1.  **Understand the Goal:** The user wants to know if the Python indentation in the provided `sessions.py` file is correct, especially after the recent complex modifications involving prompt construction, tokenization, and truncation.
+
+2.  **Identify Python's Indentation Rule:** Python uses indentation (whitespace, typically 4 spaces) to define code blocks (functions, loops, conditionals, try/except blocks, etc.). Consistency is key. A block starts after a colon (`:`) and includes all subsequent lines indented *further* than the line containing the colon. The block ends when the indentation returns to the level of the line containing the colon (or less).
+
+3.  **Strategy: Visual Scan + Block Analysis:**
+    *   **Top Level:** Scan the imports, logger, router definition, and helper function (`get_session_or_404`). Ensure they are all at the base indentation level (0).
+    *   **Functions/Methods:** For each `async def` function:
+        *   Locate the function definition line (`async def ...:`).
+        *   Verify all code *inside* the function is indented one level deeper (e.g., 4 spaces).
+        *   Within the function, look for control flow statements (`if`, `for`, `try`, `async with`, etc.) ending in a colon.
+        *   Verify the code *within* those blocks is indented *another* level deeper (e.g., 8 spaces relative to the base, or 4 spaces relative to the control flow statement).
+        *   Pay attention to `try...except...finally` blocks. The `except` and `finally` clauses should be at the *same* indentation level as the corresponding `try`. The code inside `except` and `finally` should be one level deeper.
+        *   Check `if...elif...else` structures. `if`, `elif`, and `else` should be at the same level. Code inside each should be one level deeper.
+    *   **Consistency:** Ensure the *amount* of indentation is consistent (usually 4 spaces per level). Mixing tabs and spaces can cause hidden errors, though modern editors often handle this.
+    *   **Specific Areas of Concern:** Pay extra attention to the heavily modified `add_message_to_session` function, especially around the new `if llm_status... else:` block and the nested `try...except` blocks within the RAG and history sections.
+
+4.  **Detailed Walkthrough (Mental or using an editor):**
+
+    *   `get_session_or_404`: Looks good. `query = ...`, `session = ...`, `if not session:`, `raise ...`, `return ...` are all indented under the `async def`.
+    *   `create_session`: Looks good. Standard function structure, `try/except` block is correctly indented.
+    *   `list_sessions`: Looks good.
+    *   `get_session`: Looks good.
+    *   `delete_session`: Looks good. `async with` block correctly indented inside the function, `try/except` correctly indented inside the `async with`.
+    *   `add_message_to_session`:
+        *   Initial `if message_data.role...`: Correct.
+        *   `session = ...`, `user_message_content = ...` etc.: Correct.
+        *   `try...except` for storing user message: Correct.
+        *   **RAG Search Section:** `if rag_document_ids_in_session:` starts a block. `logger.info`, `try:`, `except Exception as e:`, `else:` are all correctly indented within this `if`. Code inside the `try` (getting collection, embedding, query, processing results) is indented further. Code inside the `except` (`logger.error`, `rag_context = ...`) is indented. Code inside the `else` (`logger.info`) is indented. Looks good.
+        *   **Chat History Section:** `try...except` block: Correct.
+        *   **Prompt Construction Section:** `logger.info`, `llm_status_data = ...`, `if llm_status... else:` structure. `if` and `else` are at the same level. Code inside `if` (`error_detail = ...`, `logger.warning`, etc.) is indented. Code inside `else` (defining components, calculating tokens, tokenize/truncate RAG, tokenize/truncate History, assemble final prompt, final token check) looks consistently indented within the `else` block. The nested `if` statements within the tokenization/truncation logic also appear correctly indented. Looks good.
+        *   **Call LLM Service Section:** `try...except` block: Correct. `logger.info`, `loop = ...`, `llm_response = await ...`, `if llm_response is None:`, `raise ...`, `assistant_response_content = ...`, `logger.info`, `logger.debug` are all indented under the `try`. `except Exception as e:` and its contents are indented correctly relative to the `try`. Looks good.
+        *   **Store Assistant Message Section:** `try...except` block: Correct. Code inside `try` and `except` is indented. Looks good.
+    *   `list_messages_in_session`: Looks good.
+
+5.  **Final Check:** Look for any lines that seem "out of place" horizontally compared to their surrounding logical block.
+
+6.  **Conclusion:** Based on the visual scan and block analysis, the indentation appears correct throughout the file, including the complex `add_message_to_session` function. There are no obvious indentation errors jumping out.
+
+Yes, based on a careful visual review, the Python indentation in the `app/api/endpoints/sessions.py` code you provided appears to be **correct**.
+
+Here's a breakdown of why:
+
+1.  **Top-Level:** Imports, logger definition, and the `router = APIRouter()` line are all at the base level (no indentation).
+2.  **Function Definitions:** Each `async def` function definition starts at the base level.
+3.  **Function Bodies:** All code directly inside each function (like variable assignments, `try` blocks, `if` conditions, `for` loops, `await` calls) is consistently indented one level deeper (typically 4 spaces).
+4.  **Nested Blocks:**
+    *   Code inside `if`, `else`, `elif` blocks is indented one level further than the condition line.
+    *   Code inside `try`, `except`, `finally` blocks is indented one level further than the `try`/`except`/`finally` line.
+    *   Code inside `async with` blocks is indented one level further.
+5.  **Consistency:** The indentation level seems consistent throughout the file (appears to be 4 spaces per level).
+
+The complex structure within `add_message_to_session`, including the nested `if/else` for checking LLM status and the various `try/except` blocks, seems to follow standard Python indentation rules correctly.
+
+Unless there's a subtle mix of tabs and spaces that isn't visually apparent (which a good editor or linter would usually flag), the indentation looks syntactically valid.
+
+With the core functionality now working, we can confidently move to the final planned step: the **System Status API**. Shall we proceed?
+
+"proceed with the System Status API."
+
+The user wants to add endpoints to monitor the server's system resources.
+
+**Plan:**
+
+1.  **Identify necessary libraries:**
+    *   `psutil`: A cross-platform library for retrieving information on running processes and system utilization (CPU, memory, disks, network, sensors). This is the standard choice.
+    *   `pynvml`: (Optional) For detailed NVIDIA GPU monitoring (memory usage, utilization, temperature). This requires the NVIDIA drivers and the NVML library to be installed on the system. We should make its usage optional/conditional.
+
+2.  **Define API Response Models:** Create Pydantic models to structure the system status information (CPU, RAM, Disk, GPU).
+
+3.  **Create Service Functions:** Write functions (likely synchronous, as `psutil` calls are generally fast and might be CPU-bound) to gather the system data using `psutil` and `pynvml` (if available).
+
+4.  **Create API Endpoints:** Build FastAPI endpoints that call the service functions and return the status information using the defined response models.
+
+5.  **Integrate Router:** Add the new system status router to `main.py`.
+
+**Refinement on GPU Monitoring:**
+
+*   Detect `pynvml` availability.
+*   If available, try to initialize it and fetch GPU data.
+*   If not available or initialization fails, gracefully omit GPU information from the response or indicate it's unavailable.
+*   Wrap `pynvml` calls in `try...except` blocks as initialization or queries can fail.
+*   Remember to call `pynvml.nvmlShutdown()` when done, ideally during server shutdown, although for a simple status check, initializing/shutting down each time might be acceptable but less efficient. Let's try initializing once and keeping the handle if possible, or initialize/shutdown per request for simplicity first. Per-request might be safer if errors occur.
+
+**Refinement on Temperature:**
+*   `psutil.sensors_temperatures()` might provide CPU/other temps, but it's highly platform-dependent and might require specific setup or permissions. We should include it but note its potential unavailability.
+
+**Models Structure:**
+
+*   `CPUStatus` (usage_percent, core_count_logical, core_count_physical, current_frequency, max_frequency)
+*   `MemoryStatus` (total_gb, available_gb, used_gb, used_percent)
+*   `DiskStatus` (path, total_gb, used_gb, free_gb, used_percent) - Could be a list for multiple partitions.
+*   `GPUStatus` (driver_version, name, memory_total_mb, memory_used_mb, memory_free_mb, utilization_percent, temperature_celsius) - Could be a list for multiple GPUs.
+*   `SystemStatusResponse` (cpu, memory, disks: List[DiskStatus], gpus: List[GPUStatus], temperatures: Optional[Dict])
+
+Okay, let's implement the System Status API. We'll use the `psutil` library, which is excellent for gathering cross-platform system information, and optionally `pynvml` for detailed NVIDIA GPU stats if available.
+
+**Step 9: System Status API**
+
+1.  **Install Dependencies:**
+    ```bash
+    pip install psutil pynvml
+    ```
+    *   `psutil`: For CPU, RAM, Disk, Temp (platform-dependent), etc.
+    *   `pynvml`: For NVIDIA GPU details (will work only if NVIDIA drivers and NVML library are installed).
+
+2.  **Define API Models (`app/api/models/system.py`):**
+    Create a new file for system status models.
+
+    ```python
+    # app/api/models/__init__.py
+    # (Ensure this file exists)
+    ```
+
+    ```python
+    # app/api/models/system.py
+    from pydantic import BaseModel, Field
+    from typing import List, Optional, Dict, Any
+
+    # --- Helper function for GB conversion ---
+    def bytes_to_gb(num_bytes: Optional[int]) -> Optional[float]:
+        if num_bytes is None:
+            return None
+        return round(num_bytes / (1024 ** 3), 2)
+
+    class CPUStatus(BaseModel):
+        usage_percent: float = Field(..., description="Current overall CPU utilization percentage.")
+        core_count_logical: int = Field(..., description="Number of logical CPU cores (including hyperthreading).")
+        core_count_physical: int = Field(..., description="Number of physical CPU cores.")
+        current_frequency_mhz: Optional[float] = Field(None, description="Current CPU frequency in MHz.")
+        max_frequency_mhz: Optional[float] = Field(None, description="Maximum CPU frequency in MHz.")
+
+    class MemoryStatus(BaseModel):
+        total_gb: Optional[float] = Field(..., description="Total physical RAM in GB.")
+        available_gb: Optional[float] = Field(..., description="Available RAM in GB.")
+        used_gb: Optional[float] = Field(..., description="Used RAM in GB.")
+        used_percent: float = Field(..., description="RAM usage percentage.")
+
+    class DiskUsage(BaseModel):
+        path: str = Field(..., description="Mount point of the disk partition.")
+        total_gb: Optional[float] = Field(..., description="Total space on the partition in GB.")
+        used_gb: Optional[float] = Field(..., description="Used space on the partition in GB.")
+        free_gb: Optional[float] = Field(..., description="Free space on the partition in GB.")
+        used_percent: float = Field(..., description="Disk usage percentage for the partition.")
+
+    class GPUStatus(BaseModel):
+        id: int = Field(..., description="GPU index.")
+        name: str = Field(..., description="GPU model name.")
+        driver_version: Optional[str] = Field(None, description="NVIDIA driver version.")
+        memory_total_mb: int = Field(..., description="Total GPU memory in MB.")
+        memory_used_mb: int = Field(..., description="Used GPU memory in MB.")
+        memory_free_mb: int = Field(..., description="Free GPU memory in MB.")
+        utilization_gpu_percent: Optional[int] = Field(None, description="GPU utilization percentage.")
+        temperature_celsius: Optional[int] = Field(None, description="GPU temperature in Celsius.")
+
+    class SystemStatusResponse(BaseModel):
+        cpu: CPUStatus
+        memory: MemoryStatus
+        disks: List[DiskUsage]
+        gpus: Optional[List[GPUStatus]] = Field(None, description="List of NVIDIA GPU statuses (if available).")
+        temperatures_celsius: Optional[Dict[str, Any]] = Field(None, description="Sensor temperatures (platform dependent).")
+
+    ```
+    *   Defines structures for CPU, Memory, Disk (list), GPU (list, optional), and the overall system status.
+    *   Includes a helper to convert bytes to GB for readability.
+
+3.  **Create System Service (`services/system_service.py`):**
+    This service gathers the data.
+
+    ```python
+    # services/system_service.py
+    import logging
+    import shutil # For disk usage
+    from typing import Dict, Any, Optional, List
+
+    import psutil
+
+    # Attempt to import pynvml, but don't fail if it's not installed or unusable
+    try:
+        import pynvml
+        pynvml_available = True
+        try:
+            pynvml.nvmlInit()
+            logger.info("pynvml initialized successfully.")
+            # Optionally get driver version once
+            # driver_version = pynvml.nvmlSystemGetDriverVersion()
+        except pynvml.NVMLError as e:
+            logger.warning(f"pynvml found but failed to initialize: {e}. GPU monitoring disabled.")
+            pynvml_available = False
+    except ImportError:
+        logger.info("pynvml not found. NVIDIA GPU monitoring will be unavailable.")
+        pynvml_available = False
+    except Exception as e:
+        logger.warning(f"An unexpected error occurred during pynvml import/init: {e}")
+        pynvml_available = False
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # --- Helper function for GB conversion ---
+    def bytes_to_gb(num_bytes: Optional[int]) -> Optional[float]:
+        if num_bytes is None:
+            return None
+        return round(num_bytes / (1024 ** 3), 2)
+
+    def bytes_to_mb(num_bytes: Optional[int]) -> Optional[int]:
+         if num_bytes is None:
+            return None
+         return round(num_bytes / (1024 ** 2))
+
+
+    # --- Core Data Gathering Functions ---
+
+    def get_cpu_status() -> Dict[str, Any]:
+        """Gathers CPU information using psutil."""
+        usage = psutil.cpu_percent(interval=0.1) # Short interval for responsiveness
+        logical_cores = psutil.cpu_count(logical=True)
+        physical_cores = psutil.cpu_count(logical=False)
+
+        freq = psutil.cpu_freq()
+        current_freq = getattr(freq, 'current', None)
+        max_freq = getattr(freq, 'max', None)
+
+        return {
+            "usage_percent": usage,
+            "core_count_logical": logical_cores,
+            "core_count_physical": physical_cores,
+            "current_frequency_mhz": current_freq,
+            "max_frequency_mhz": max_freq
+        }
+
+    def get_memory_status() -> Dict[str, Any]:
+        """Gathers RAM information using psutil."""
+        mem = psutil.virtual_memory()
+        return {
+            "total_gb": bytes_to_gb(mem.total),
+            "available_gb": bytes_to_gb(mem.available),
+            "used_gb": bytes_to_gb(mem.used),
+            "used_percent": mem.percent
+        }
+
+    def get_disk_status() -> List[Dict[str, Any]]:
+        """Gathers disk usage for relevant partitions using psutil."""
+        disk_info = []
+        # Define partitions you care about, or use psutil.disk_partitions() to get all
+        # Example: Checking root ('/'), home ('/home'), and data ('/data') if they exist
+        partitions_to_check = ['/']
+        # Add more relevant paths if needed, e.g., where models or data are stored
+        # partitions_to_check.append(str(settings.DATA_DIR.parent)) # Example: project root disk
+        # partitions_to_check.append(str(settings.HUGGINGFACE_HUB_CACHE.parent)) # Cache disk
+
+        # Get all partitions and check the relevant ones
+        all_partitions = psutil.disk_partitions(all=False) # all=False avoids CD/floppy etc.
+        checked_paths = set()
+
+        for part in all_partitions:
+             mountpoint = part.mountpoint
+             # Check if this mountpoint covers any path we care about
+             relevant = any(mountpoint == p or p.startswith(mountpoint + '/') for p in partitions_to_check)
+
+             # Or simply include common/root partitions
+             # relevant = mountpoint in ['/', '/home', '/var', '/data'] # Adjust as needed
+
+             # Let's just check the root '/' for simplicity now
+             if mountpoint == '/' and mountpoint not in checked_paths:
+                 try:
+                     usage = psutil.disk_usage(mountpoint)
+                     disk_info.append({
+                         "path": mountpoint,
+                         "total_gb": bytes_to_gb(usage.total),
+                         "used_gb": bytes_to_gb(usage.used),
+                         "free_gb": bytes_to_gb(usage.free),
+                         "used_percent": usage.percent
+                     })
+                     checked_paths.add(mountpoint)
+                 except Exception as e:
+                     logger.warning(f"Could not get disk usage for {mountpoint}: {e}")
+
+        # You might want to explicitly add usage for specific directories like data/models
+        # using shutil.disk_usage if they reside on different partitions not caught above.
+        # Example:
+        # try:
+        #     data_usage = shutil.disk_usage(settings.DATA_DIR)
+        #     # ... append if path not already checked ...
+        # except FileNotFoundError:
+        #     pass
+
+        return disk_info
+
+    def get_gpu_status() -> Optional[List[Dict[str, Any]]]:
+        """Gathers NVIDIA GPU information using pynvml, if available."""
+        if not pynvml_available:
+            return None
+
+        gpu_info = []
+        try:
+            num_devices = pynvml.nvmlDeviceGetCount()
+            driver_version = pynvml.nvmlSystemGetDriverVersion() # Get driver version once
+
+            for i in range(num_devices):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                name = pynvml.nvmlDeviceGetName(handle)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                try:
+                    temperature = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                except pynvml.NVMLError_NotSupported:
+                     temperature = None # Temp reading might not be supported
+
+                gpu_info.append({
+                    "id": i,
+                    "name": name,
+                    "driver_version": driver_version, # Return bytes as string
+                    "memory_total_mb": bytes_to_mb(mem_info.total),
+                    "memory_used_mb": bytes_to_mb(mem_info.used),
+                    "memory_free_mb": bytes_to_mb(mem_info.free),
+                    "utilization_gpu_percent": utilization.gpu,
+                    "temperature_celsius": temperature
+                })
+        except pynvml.NVMLError as e:
+            logger.error(f"Failed to get GPU info via pynvml: {e}")
+            # May need re-initialization if error occurred?
+            # For simplicity, just return None or partial info if preferred
+            return None # Indicate GPU info unavailable due to error
+        except Exception as e:
+             logger.error(f"Unexpected error getting GPU info: {e}", exc_info=True)
+             return None
+
+        return gpu_info
+
+    def get_temperature_status() -> Optional[Dict[str, Any]]:
+        """Gathers sensor temperatures using psutil (platform dependent)."""
+        temps = {}
+        if hasattr(psutil, "sensors_temperatures"):
+            try:
+                all_temps = psutil.sensors_temperatures()
+                if not all_temps:
+                     return None # No sensors found/accessible
+
+                # Process the temps dictionary (structure varies by OS)
+                # Example: Select specific sensors like 'coretemp' on Linux
+                for name, entries in all_temps.items():
+                    temp_list = []
+                    for entry in entries:
+                        temp_list.append({
+                            "label": entry.label or f"Sensor_{len(temp_list)}",
+                            "current": entry.current,
+                            "high": entry.high,
+                            "critical": entry.critical,
+                        })
+                    if temp_list: # Only add if we found entries
+                        temps[name] = temp_list
+
+                return temps if temps else None # Return None if processing yielded nothing
+
+            except Exception as e:
+                logger.warning(f"Could not read sensor temperatures: {e}. This may require specific permissions or setup.")
+                return None
+        else:
+            logger.info("psutil.sensors_temperatures not available on this platform.")
+            return None
+
+    def get_full_system_status() -> Dict[str, Any]:
+        """Gathers all system status components."""
+        status = {
+            "cpu": get_cpu_status(),
+            "memory": get_memory_status(),
+            "disks": get_disk_status(),
+            "gpus": get_gpu_status(),
+            "temperatures_celsius": get_temperature_status()
+        }
+        return status
+
+    # --- Optional: Shutdown NVML ---
+    # Could be called during FastAPI shutdown event
+    def shutdown_nvml():
+        if pynvml_available:
+            try:
+                 pynvml.nvmlShutdown()
+                 logger.info("pynvml shut down successfully.")
+            except pynvml.NVMLError as e:
+                 logger.warning(f"Error during pynvml shutdown: {e}")
+
+    ```
+    *   Imports `psutil` and conditionally imports `pynvml`, handling `ImportError` and initialization errors.
+    *   Includes helper functions for byte conversion.
+    *   `get_cpu_status`, `get_memory_status`, `get_disk_status`, `get_gpu_status`, `get_temperature_status`: Each function focuses on one component using `psutil` or `pynvml`.
+    *   GPU/Temp functions handle potential errors or unavailability gracefully.
+    *   `get_full_system_status`: Orchestrates calls to the individual functions.
+    *   Added `shutdown_nvml` (we'll hook this into the FastAPI shutdown later).
+
+4.  **Create System API Endpoints (`app/api/endpoints/system.py`):**
+
+    ```python
+    # app/api/endpoints/system.py
+    import logging
+    from fastapi import APIRouter, HTTPException
+
+    # Import models and service functions
+    from app.api.models.system import SystemStatusResponse
+    from services.system_service import get_full_system_status
+
+    logger = logging.getLogger(__name__)
+    router = APIRouter()
+
+    @router.get(
+        "/status",
+        response_model=SystemStatusResponse,
+        summary="Get current server system status",
+    )
+    async def get_system_status_endpoint():
+        """
+        Retrieves current system status including CPU, RAM, Disk,
+        and GPU information (if available).
+        """
+        try:
+            # Calls are synchronous but generally fast enough for status checks.
+            # For very high frequency polling, consider running in executor.
+            status_data = get_full_system_status()
+            # Use Pydantic's parse_obj for validation before returning
+            return SystemStatusResponse.parse_obj(status_data)
+        except Exception as e:
+            logger.error(f"Error retrieving system status: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to retrieve system status.")
+
+    ```
+    *   Simple router with one endpoint `/status`.
+    *   Calls the `get_full_system_status` service function.
+    *   Uses `parse_obj` to validate the collected data against the `SystemStatusResponse` model.
+
+5.  **Integrate System Router and NVML Shutdown in `app/main.py`:**
+
+    ```python
+    # app/main.py
+    # ... (imports) ...
+    from app.api.endpoints import documents, sessions, models
+    from app.api.endpoints import system # <--- ADDED IMPORT
+
+    # Import service functions for shutdown
+    from services.system_service import shutdown_nvml
+    from services.llm_service import llm_state, LLMStatus # For potential LLM unload on shutdown
+
+    # ... (FastAPI app setup) ...
+
+    # --- Event Handlers ---
+    @app.on_event("startup")
+    async def startup_event():
+        # ... (existing startup logic: connect_db, load embedding model) ...
+        print("--> Event: startup complete.")
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """Disconnect DB, shutdown NVML, potentially unload models."""
+        print("--> Event: shutdown")
+        await disconnect_db()
+
+        # --- ADDED: Shutdown NVML ---
+        print("--> Shutting down NVML...")
+        try:
+             # This call is synchronous, fine for shutdown
+             shutdown_nvml()
+        except Exception as e:
+             print(f"--> WARNING: Error during NVML shutdown: {e}")
+        # --- END ADDED ---
+
+        # --- Optional: Unload LLM model on shutdown? ---
+        # If you want to release GPU memory explicitly on shutdown
+        # if llm_state.get("status") == LLMStatus.LOADED:
+        #     print("--> Unloading LLM model...")
+        #     # Need an unload function or run parts of _load_model_task's unload logic
+        #     # unload_llm_model() # Assume such a sync function exists
+        # --- End Optional Unload ---
+
+        print("--> Event: shutdown complete.")
+
+
+    # --- Basic Root Endpoint ---
+    # ... (root endpoint) ...
+
+    # --- Include API Routers ---
+    app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"])
+    app.include_router(sessions.router, prefix="/api/v1/sessions", tags=["Chat Sessions"])
+    app.include_router(models.router, prefix="/api/v1/models", tags=["LLM Management"])
+    # --- ADDED: Include system router ---
+    app.include_router(
+        system.router,
+        prefix="/api/v1/system",
+        tags=["System Status"] # New tag
+    )
+    # --- END ADDED ---
+
+    # ... (if __name__ == "__main__": block) ...
+    ```
+    *   Import the `system` router and the `shutdown_nvml` function.
+    *   Include the `system.router` with a prefix and tag.
+    *   In the `shutdown` event handler, add a call to `shutdown_nvml()` within a try-except block.
+
+6.  **Run and Test:**
+    *   Restart the server: `uvicorn app.main:app --reload ...`
+    *   Check the startup logs. You should see messages about `pynvml` initialization (or warnings if it failed/not found).
+    *   Go to `/docs`. You should see the new "System Status" section.
+    *   Execute `GET /api/v1/system/status`.
+    *   Examine the response. It should contain CPU, Memory, Disk information.
+    *   If you have an NVIDIA GPU and drivers installed correctly, the `gpus` field should be populated. Otherwise, it will likely be `null`.
+    *   The `temperatures_celsius` field may or may not be populated depending on your OS, hardware sensors, and permissions.
+
+**Summary:**
+
+We have added a comprehensive System Status API:
+*   Monitors CPU usage and frequency.
+*   Monitors RAM usage.
+*   Monitors Disk usage for key partitions.
+*   Monitors NVIDIA GPU utilization, memory, and temperature (conditionally, using `pynvml`).
+*   Attempts to monitor system temperatures (conditionally, using `psutil`).
+*   Provides a single endpoint (`/api/v1/system/status`) to retrieve all metrics.
+*   Handles potential library issues (e.g., `pynvml` not installed) gracefully.
+*   Ensures NVML resources are cleaned up on server shutdown.
+
+This completes the final major feature planned for our RAG LLM server! We now have capabilities for document management, RAG search, LLM interaction, chat session management, and system monitoring.
+
+the LLM model listing is not getting the models currently cached in the HuggingFace Hub. Here is what I get when I request:
+
+INFO:services.llm_service:Scanning for local models in: /home/ken/Documents/gestalt/rag_llm_server/local_models
+INFO:services.llm_service:Found 0 potential models in /home/ken/Documents/gestalt/rag_llm_server/local_models.
+INFO:services.llm_service:Scanning for cached Hub models in: /home/ken/Documents/gestalt/rag_llm_server/models_cache
+INFO:services.llm_service:Found 1 potential cached models in /home/ken/Documents/gestalt/rag_llm_server/models_cache.
+INFO:     127.0.0.1:51020 - "GET /api/v1/models/available HTTP/1.1" 200 OK
+
+{
+  "local_model_paths": [],
+  "cached_hub_models": [
+    "sentence-transformers/all-MiniLM-L6-v2"
+  ]
+}
+
+Ah, okay. The API is working correctly based on the *current configuration*, but it's not finding the LLM (`gpt2`) you previously loaded because of where it's looking.
+
+**Diagnosis:**
+
+1.  **`local_model_paths`:** This is correctly empty because your `./local_models` directory is empty.
+2.  **`cached_hub_models`:** This list *only* contains `sentence-transformers/all-MiniLM-L6-v2`.
+3.  **Scanning Location:** The logs clearly show why:
+    ```
+    INFO:services.llm_service:Scanning for cached Hub models in: /home/ken/Documents/gestalt/rag_llm_server/models_cache
+    ```
+    The `list_cached_hub_models` function is scanning the directory specified by `settings.HUGGINGFACE_HUB_CACHE`, which you've configured to be `./models_cache` within your project directory.
+4.  **Model Download Location:** When you loaded `gpt2` using the `transformers.pipeline` (without explicitly setting `cache_dir` in the final working version), the `transformers` library downloaded it to its **default cache location**, which is typically `~/.cache/huggingface/hub` (i.e., in your home directory `.cache/huggingface/hub`), *not* your project's `./models_cache` directory.
+5.  **`all-MiniLM-L6-v2`:** This model *is* likely in your `./models_cache` directory because we explicitly set the `cache_folder` when loading the `SentenceTransformer` in `services/embedding_service.py`:
+    ```python
+    # services/embedding_service.py
+    _embedding_model = SentenceTransformer(
+        settings.EMBEDDING_MODEL_NAME,
+        device=settings.EMBEDDING_DEVICE,
+        cache_folder=str(settings.HUGGINGFACE_HUB_CACHE.resolve()) # Explicitly used ./models_cache
+    )
+    ```
+
+**Solution:**
+
+You have a few options, depending on your preferred workflow:
+
+**Option 1: Scan the Default HF Cache (Recommended for finding *all* downloaded models)**
+
+Modify `services/llm_service.py` to also scan (or primarily scan) the default Hugging Face cache location.
+
+```python
+# services/llm_service.py
+import os # Import os
+from pathlib import Path
+from typing import Optional, List, Set # Import Set
+
+# ... (other imports)
+
+# --- Define default cache location (adjust if needed based on HF documentation/env vars) ---
+DEFAULT_HF_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
+
+# --- Helper Function to Scan HF Hub Cache ---
+def list_cached_hub_models() -> List[str]:
+    """
+    Scans the configured Hugging Face Hub cache directory AND the default
+    cache directory for downloaded models.
+    """
+    hub_models: Set[str] = set() # Use a set to automatically handle duplicates
+    # Directories to scan
+    scan_dirs = {settings.HUGGINGFACE_HUB_CACHE.resolve(), DEFAULT_HF_CACHE.resolve()}
+
+    for cache_dir in scan_dirs:
+        logger.info(f"Scanning for cached Hub models in: {cache_dir}")
+        if not cache_dir.is_dir():
+            logger.warning(f"Cache directory not found or not a directory: {cache_dir}")
+            continue
+
+        for item in cache_dir.iterdir():
+            if item.is_dir() and item.name.startswith("models--"):
+                snapshots_dir = item / "snapshots"
+                if snapshots_dir.is_dir() and any(snapshots_dir.iterdir()):
+                    model_id = item.name.removeprefix("models--").replace("--", "/")
+                    logger.debug(f"Found potential cached Hub model: {model_id} (from {item.name}) in {cache_dir}")
+                    hub_models.add(model_id) # Add to set
+
+    logger.info(f"Found {len(hub_models)} unique potential cached models across specified cache directories.")
+    return sorted(list(hub_models)) # Return sorted list
+
+# ... (rest of the file)
+```
+*   We define the typical default path `~/.cache/huggingface/hub`.
+*   We create a `set` of directories to scan, including both the configured one (`settings.HUGGINGFACE_HUB_CACHE`) and the default one. Using `resolve()` ensures we have absolute paths and the set handles potential duplicates if they point to the same place.
+*   The function now iterates through *both* directories.
+*   A `set` is used for `hub_models` to automatically store only unique model IDs found across potentially overlapping cache locations.
+
+**Option 2: Configure Transformers to *Use* Your Project Cache**
+
+If you want *all* models (embedding and LLM) to be stored within your project's `./models_cache`, you need to configure the `transformers` library to use it. This is typically done via **environment variables** before the library is imported.
+
+*   **How:** Before starting Uvicorn, set the `TRANSFORMERS_CACHE` or `HF_HOME` environment variable:
+    ```bash
+    # Option A: Set TRANSFORMERS_CACHE
+    export TRANSFORMERS_CACHE=/home/ken/Documents/gestalt/rag_llm_server/models_cache
+    uvicorn app.main:app --reload ...
+
+    # Option B: Set HF_HOME (affects datasets, hub downloads etc.)
+    # The cache structure might be slightly different under HF_HOME (e.g., HF_HOME/hub/)
+    # export HF_HOME=/home/ken/Documents/gestalt/rag_llm_server/hf_home
+    # uvicorn app.main:app --reload ...
+    ```
+*   **Effect:** If you do this *before* loading `gpt2`, `transformers` will download it into `./models_cache`, and your *existing* `list_cached_hub_models` function (which only scans `./models_cache`) would then find it.
+*   **Downside:** You might need to re-download models if they were previously only in the default cache.
+
+**Recommendation:**
+
+**Option 1** is generally better for *discovery* ("show me everything I might have downloaded anywhere"). It doesn't require changing how models are downloaded.
+
+**Option 2** is better if you strictly want *all* artifacts related to this project confined within the project directory for easier management or portability.
+
+Choose Option 1 for now unless you have a strong reason for Option 2. Apply the code changes from Option 1 to `services/llm_service.py`, restart the server, and run `GET /api/v1/models/available` again. You should now see `"gpt2"` listed in the `cached_hub_models` list.
+
+NFO:     Started server process [405179]
+INFO:     Waiting for application startup.
+--> Event: startup
+INFO:databases:Connected to database sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server/data/rag_server.db
+Database connection established.
+--> Pre-loading embedding model...
+INFO:services.embedding_service:Loading embedding model 'all-MiniLM-L6-v2' onto device 'cuda'...
+INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+INFO:services.embedding_service:Embedding model loaded successfully in 1.01 seconds.
+--> Embedding model loading initiated.
+--> Event: startup complete.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:45174 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45174 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:services.llm_service:Scanning for local models in: /home/ken/Documents/gestalt/rag_llm_server/local_models
+INFO:services.llm_service:Found 0 potential models in /home/ken/Documents/gestalt/rag_llm_server/local_models.
+INFO:services.llm_service:Scanning for cached Hub models in: /home/ken/.cache/huggingface/hub
+INFO:services.llm_service:Scanning for cached Hub models in: /home/ken/Documents/gestalt/rag_llm_server/models_cache
+INFO:services.llm_service:Found 20 unique potential cached models across specified cache directories.
+INFO:     127.0.0.1:39480 - "GET /api/v1/models/available HTTP/1.1" 200 OK
+INFO:app.api.endpoints.models:Received request to load model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' with device='cuda', quantization='None'.
+INFO:app.api.endpoints.models:Scheduled background loading task for model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'.
+INFO:     127.0.0.1:33168 - "POST /api/v1/models/load HTTP/1.1" 202 Accepted
+INFO:services.llm_service:Starting model loading task for 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' on device 'cuda' with quantization 'None'...
+INFO:services.llm_service:Loading tokenizer for 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'...
+tokenizer_config.json: 100%|███████████████| 1.29k/1.29k [00:00<00:00, 18.1MB/s]
+tokenizer.model: 100%|███████████████████████| 500k/500k [00:00<00:00, 3.19MB/s]
+tokenizer.json: 100%|██████████████████████| 1.84M/1.84M [00:00<00:00, 2.01MB/s]
+special_tokens_map.json: 100%|█████████████████| 551/551 [00:00<00:00, 7.89MB/s]
+INFO:services.llm_service:Tokenizer loaded.
+INFO:services.llm_service:Initializing pipeline with: model='TinyLlama/TinyLlama-1.1B-Chat-v1.0', device_map='cuda', quantization_config=None
+Device set to use cuda
+INFO:services.llm_service:Successfully loaded model 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' in 3.48 seconds.
+INFO:services.llm_service:Determined model max length: 2048
+INFO:services.llm_service:Model loading task for 'TinyLlama/TinyLlama-1.1B-Chat-v1.0' finished in 3.48 seconds. Status: Loaded
+INFO:     127.0.0.1:54502 - "GET /api/v1/models/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39688 - "GET /api/v1/documents/?skip=0&limit=100 HTTP/1.1" 200 OK
+INFO:app.api.endpoints.sessions:Created new session with ID: e46e84e2-b8f7-4088-a1f6-8541fb378f86, Name: ragtime
+INFO:     127.0.0.1:36016 - "POST /api/v1/sessions/ HTTP/1.1" 201 Created
+INFO:app.api.endpoints.sessions:[Session:e46e84e2-b8f7-4088-a1f6-8541fb378f86] Stored user message (ID: 25).
+INFO:app.api.endpoints.sessions:[Session:e46e84e2-b8f7-4088-a1f6-8541fb378f86] Performing RAG search within documents: ['e3a399ac-ed0f-4850-99fe-6df12c3a1ed3']
+INFO:services.embedding_service:Generating embeddings for 1 text chunks...
+INFO:services.embedding_service:Generated and converted 1 embeddings in 0.13 seconds.
+INFO:app.api.endpoints.sessions:[Session:e46e84e2-b8f7-4088-a1f6-8541fb378f86] Retrieved 3 chunks for RAG context.
+INFO:app.api.endpoints.sessions:[Session:e46e84e2-b8f7-4088-a1f6-8541fb378f86] Retrieved last 1 messages for history.
+INFO:app.api.endpoints.sessions:Constructing prompt for LLM...
+INFO:     127.0.0.1:59800 - "POST /api/v1/sessions/e46e84e2-b8f7-4088-a1f6-8541fb378f86/messages HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py", line 426, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/uvicorn/middleware/proxy_headers.py", line 84, in __call__
+    return await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/applications.py", line 292, in __call__
+    await super().__call__(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/applications.py", line 122, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/errors.py", line 184, in __call__
+    raise exc
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/errors.py", line 162, in __call__
+    await self.app(scope, receive, _send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/exceptions.py", line 79, in __call__
+    raise exc
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/exceptions.py", line 68, in __call__
+    await self.app(scope, receive, sender)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/middleware/asyncexitstack.py", line 20, in __call__
+    raise e
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/middleware/asyncexitstack.py", line 17, in __call__
+    await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 718, in __call__
+    await route.handle(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 66, in app
+    response = await func(request)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/routing.py", line 273, in app
+    raw_response = await run_endpoint_function(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/routing.py", line 190, in run_endpoint_function
+    return await dependant.call(**values)
+  File "/home/ken/Documents/gestalt/rag_llm_server/app/api/endpoints/sessions.py", line 335, in add_message_to_session
+    tokenizer = llm_state.get("tokenizer") # Get tokenizer object from state
+NameError: name 'llm_state' is not defined
+
+Ah, a straightforward `NameError` this time!
+
+**Diagnosis:**
+
+The traceback clearly points to the problem:
+
+```
+File "/home/ken/Documents/gestalt/rag_llm_server/app/api/endpoints/sessions.py", line 335, in add_message_to_session
+    tokenizer = llm_state.get("tokenizer") # Get tokenizer object from state
+NameError: name 'llm_state' is not defined
+```
+
+Inside the `add_message_to_session` function in `app/api/endpoints/sessions.py`, we are trying to access the `llm_state` dictionary (which lives in `services/llm_service.py`), but we haven't imported it into the `sessions.py` file.
+
+**Solution:**
+
+Add the import for `llm_state` at the top of `app/api/endpoints/sessions.py`.
+
+```python
+# app/api/endpoints/sessions.py
+import uuid
+import logging
+import datetime
+import asyncio
+from typing import List, Optional, Dict, Any # Added Dict, Any
+
+from fastapi import APIRouter, HTTPException, Depends, status
+
+# Import models and db access
+from app.api.models.chat import (
+    SessionCreateRequest,
+    SessionMetadataResponse,
+    MessageCreateRequest,
+    ChatMessageResponse
+)
+from db.database import database, get_chroma_client
+from db.models import sessions_table, chat_messages_table, documents_table
+from core.config import settings
+from services.embedding_service import generate_embeddings
+
+# --- MODIFIED IMPORTS ---
+# Import LLM service functions, state, and status
+from services.llm_service import (
+    generate_text,
+    get_llm_status,
+    LLMStatus,
+    summarize_text_with_query,
+    llm_state # <--- ADD THIS IMPORT
+)
+# --- END MODIFIED IMPORTS ---
+
+from app.api.endpoints.documents import SearchQuery
+import sqlalchemy
+# Import tokenizer type hint if needed
+# from transformers import PreTrainedTokenizerBase
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# ... (rest of the file, including add_message_to_session which uses llm_state) ...
+
+```
+
+**Explanation:**
+
+By adding `llm_state` to the import list from `services.llm_service`, the `add_message_to_session` function will now be able to access the global state dictionary to retrieve the tokenizer and max length when constructing and truncating the prompt.
+
+**After Applying the Fix:**
+
+1.  Save the modified `app/api/endpoints/sessions.py`.
+2.  Restart Uvicorn.
+3.  Load the `TinyLlama/TinyLlama-1.1B-Chat-v1.0` model again.
+4.  Create a session (linking the document).
+5.  Send the message.
+
+The `NameError` should be gone, and the prompt construction/truncation logic should execute correctly, hopefully leading to a successful response from TinyLlama without CUDA errors.
+
+INFO:     127.0.0.1:37012 - "POST /api/v1/sessions/c540a5a8-dcc9-4617-a40c-fa7a0f46f30b/messages HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py", line 426, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/uvicorn/middleware/proxy_headers.py", line 84, in __call__
+    return await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/applications.py", line 292, in __call__
+    await super().__call__(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/applications.py", line 122, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/errors.py", line 184, in __call__
+    raise exc
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/errors.py", line 162, in __call__
+    await self.app(scope, receive, _send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/exceptions.py", line 79, in __call__
+    raise exc
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/exceptions.py", line 68, in __call__
+    await self.app(scope, receive, sender)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/middleware/asyncexitstack.py", line 20, in __call__
+    raise e
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/middleware/asyncexitstack.py", line 17, in __call__
+    await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 718, in __call__
+    await route.handle(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 66, in app
+    response = await func(request)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/routing.py", line 273, in app
+    raw_response = await run_endpoint_function(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/routing.py", line 190, in run_endpoint_function
+    return await dependant.call(**values)
+  File "/home/ken/Documents/gestalt/rag_llm_server/app/api/endpoints/sessions.py", line 338, in add_message_to_session
+    if llm_status["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
+NameError: name 'llm_status' is not defined
+
+Another `NameError`! It seems we missed updating one part of the code when adding the `llm_state` checks.
+
+**Diagnosis:**
+
+The traceback shows the error is here:
+
+```
+File "/home/ken/Documents/gestalt/rag_llm_server/app/api/endpoints/sessions.py", line 338, in add_message_to_session
+    if llm_status["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
+NameError: name 'llm_status' is not defined
+```
+
+We are trying to use the variable `llm_status` inside the `if` condition, but we haven't assigned anything to it yet in that scope. We assigned the result of `get_llm_status()` to `llm_status_data` earlier, but then used the incorrect variable name in the `if` check.
+
+**Solution:**
+
+Correct the variable name in the `if` condition within `add_message_to_session` in `app/api/endpoints/sessions.py`.
+
+```python
+# app/api/endpoints/sessions.py
+# ... (imports, router, helper, other endpoints) ...
+
+@router.post(
+    "/{session_id}/messages",
+    # ... (decorator) ...
+)
+async def add_message_to_session(
+    session_id: str,
+    message_data: MessageCreateRequest,
+):
+    # ... (message validation, get session, store user message) ...
+    # ... (RAG search logic) ...
+    # ... (Summarization logic) ...
+    # ... (Retrieve Chat History) ...
+
+    # --- Construct & Truncate Prompt ---
+    logger.info("Constructing final prompt using summarized context...")
+
+    # Get necessary info from LLM state
+    llm_status_data = get_llm_status() # Correctly assigned here
+    tokenizer = llm_state.get("tokenizer")
+    max_length = llm_state.get("max_model_length")
+    model_name = llm_status_data.get("model_name_or_path", "N/A") # Uses llm_status_data
+
+    # --- CORRECT THE IF CONDITION BELOW ---
+    if llm_status_data["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length: # Use llm_status_data here
+        # --- Also use llm_status_data inside this block ---
+        error_detail = f"LLM not ready (Status: {llm_status_data['status']}). Please load a model first." # Use llm_status_data
+        logger.warning(f"[Session:{session_id}] {error_detail}")
+        # logger.error(...) # Keep this line as is
+        assistant_response_content = f"[ERROR: {error_detail}]"
+        assistant_message_metadata["llm_call_error"] = error_detail
+        prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
+        # --- Need to handle the generation call if we error out here ---
+        # We should skip the actual LLM call if we enter this block.
+        # Add a flag or restructure slightly. Let's add a flag for now.
+        llm_ready = False
+    else:
+        llm_ready = True # Flag to indicate LLM is ready
+        # --- Define Prompt Components ---
+        # ... (rest of the prompt construction logic: instruction_text, reserved_tokens, etc.) ...
+        # ... (Tokenize and Truncate Components) ...
+        # ... (Assemble Final Prompt) ...
+        # ... (Final Token Check) ...
+
+    # logger.debug(...) # Log the constructed prompt
+
+    # --- ### MODIFIED: Check llm_ready flag before calling LLM ### ---
+    if llm_ready:
+        try:
+            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}'...") # Use model_name defined earlier
+            loop = asyncio.get_running_loop()
+            llm_response = await loop.run_in_executor(
+                None, generate_text, prompt_for_llm
+            )
+            if llm_response is None:
+                raise Exception("LLM generation failed or returned None.")
+            assistant_response_content = llm_response
+            logger.info(f"[Session:{session_id}] Received response from LLM.")
+            logger.debug(f"[Session:{session_id}] LLM Response:\n{assistant_response_content[:500]}...")
+
+        except Exception as e:
+            error_detail = f"LLM generation failed: {type(e).__name__}"
+            logger.error(f"[Session:{session_id}] {error_detail}: {e}", exc_info=True)
+            # Ensure response content is set on error if it wasn't already
+            if assistant_response_content is None:
+                 assistant_response_content = f"[ERROR: {error_detail}]"
+            assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}"
+    # If llm_ready was False, assistant_response_content was already set to the error message.
+
+    # --- Store Assistant Message ---
+    # (This part remains the same, uses assistant_response_content which now holds either response or error)
+    # ... (store message, update timestamp, return response) ...
+
+# ... (list_messages_in_session) ...
+
+```
+
+**Key Changes:**
+
+1.  **Corrected Variable Name:** Changed `llm_status` to `llm_status_data` in the `if` condition and inside the error handling block.
+2.  **`llm_ready` Flag:** Introduced a boolean flag `llm_ready`. This flag is set based on the initial status check. The actual LLM call (`run_in_executor`) is now wrapped in `if llm_ready:`, ensuring we only attempt generation if the LLM and tokenizer were confirmed to be ready during the prompt construction phase. This prevents trying to call the LLM if the initial check failed.
+
+**After Applying the Fix:**
+
+1.  Save the updated `app/api/endpoints/sessions.py`.
+2.  Restart Uvicorn.
+3.  Load the LLM.
+4.  Create a session and send the message.
+
+The `NameError` should now be resolved, and the logic should correctly skip the LLM call if the model/tokenizer isn't ready, or proceed with generation if it is.
+
+"How can I choose to connect with an LLM  from another server to use with this server setup? I want to be able to use Ollama, vLLM, and InstructLab in addition to my local models."
+
+Here's a thinking process for designing the multi-LLM backend integration:
+
+1.    **Understand the Goal:** The user wants to connect the existing RAG server to *external* LLM inference servers (Ollama, vLLM, potentially InstructLab's server component) in addition to the current Hugging Face local loading mechanism. The server should be able to *switch* between these backends.
+
+2.    **Identify Core Requirements:**
+    *   **Configuration:** Need a way to specify *which* backend to use (e.g., "local", "ollama", "vllm") and the necessary connection details (e.g., base URL for API backends).
+    *   **Abstraction:** Need a unified interface within the server code so that the chat endpoint (`add_message_to_session`) doesn't need complex `if/elif` statements for each backend. It should just call a generic "generate" function.
+    *   **Backend Implementations:** Need specific logic for interacting with each type of backend (local transformers, Ollama API, vLLM OpenAI-compatible API).
+    *   **Switching Mechanism:** Need a way to select and activate the desired backend based on the configuration.
+    *   **API Interaction:** For API-based backends (Ollama, vLLM), need an HTTP client library (like `httpx`).
+    *   **Error Handling:** Consistent error handling across different backends.
+    *   **Status Reporting:** The `/models/status` endpoint should reflect which backend is active and its specific details (model name, URL, etc.).
+
+3.  **Design the Abstraction:**
+    *   Define a base class or a common function signature for generation. Let's go with a class-based approach for better state management per backend.
+    *   Create an abstract base class `LLMBackendBase` with an `async generate(prompt: str, config: Dict[str, Any]) -> Optional[str]` method. Make it `async` because API calls will be async. Pass the generation `config` explicitly.
+    *   Subclass this for each backend:
+        *   `LocalTransformersBackend(LLMBackendBase)`: Encapsulates the existing `transformers.pipeline` logic. Needs access to the pipeline object.
+        *   `OllamaBackend(LLMBackendBase)`: Takes an Ollama base URL and model name. Uses `httpx` to call Ollama's `/api/generate` endpoint. Needs to map parameters.
+        *   `VLLMBackend(LLMBackendBase)`: Takes a vLLM base URL and model name. Uses `httpx` to call vLLM's OpenAI-compatible `/v1/completions` or `/v1/chat/completions` endpoint. Needs to map parameters.
+        *   `InstructLabBackend(LLMBackendBase)`: (Placeholder for now, assume similar OpenAI-compatible API).
+
+4.  **Refactor `llm_service.py`:**
+    *   This service should now manage the *active* backend instance instead of just the local pipeline.
+    *   Introduce a configuration setting (`LLM_BACKEND_TYPE`) to choose the backend.
+    *   Modify `llm_state` to store the *active backend instance* (`llm_state["backend_instance"]`).
+    *   Modify the loading logic:
+        *   The `/load` endpoint now needs to know *which type* of backend to load/configure. The `model_name_or_path` might now represent a model *on that backend* (e.g., "llama3" for Ollama) or a path/ID for local.
+        *   The `_load_model_task` needs to be replaced or heavily modified. Maybe have separate load functions per backend type? Or a factory function?
+        *   Let's simplify: Instead of `/load` dynamically loading different *types*, let's configure the desired backend *type* and its *URL* in `settings`. The `/load` endpoint will then primarily load/configure the *model* for the *currently configured* backend type.
+        *   Local loading remains similar (using `run_in_executor`).
+        *   API backends don't need "loading" in the same way; they just need configuration (URL, model name). The `/load` endpoint could be used to *select* the model *on* the API backend and maybe verify the connection.
+    *   Modify `generate_text`: This function becomes much simpler. It just gets the active `backend_instance` from `llm_state` and calls `await backend_instance.generate(prompt, config)`.
+    *   Modify `get_llm_status`: Needs to report the active backend type, URL (if applicable), and the model selected on that backend.
+    *   Modify `update_llm_config`: Should update the config stored in `llm_state`, which will be passed to the active backend's `generate` method.
+
+5.  **Update Configuration (`config.py`):**
+    *   Add `LLM_BACKEND_TYPE: str = Field(default="local", description="'local', 'ollama', 'vllm'")`
+    *   Add `OLLAMA_BASE_URL: Optional[str] = Field(default=None, description="Base URL for Ollama API (e.g., http://localhost:11434)")`
+    *   Add `VLLM_BASE_URL: Optional[str] = Field(default=None, description="Base URL for vLLM OpenAI-compatible API (e.g., http://localhost:8000)")`
+    *   The existing `DEFAULT_MODEL_NAME` might need context – is it the local path or the model name on the API server? Let the `/load` request specify the model relevant to the active backend.
+
+6.  **Implement API Backends:**
+    *   Install `httpx`: `pip install httpx`.
+    *   **Ollama:**
+        *   Need the `/api/generate` endpoint structure (model, prompt, stream=False, options={...}).
+        *   Map our config (temp, top_k, etc.) to Ollama's `options`.
+        *   Handle potential errors from the API call.
+    *   **vLLM (OpenAI compatible):**
+        *   Decide between `/completions` (legacy) or `/chat/completions`. `/chat/completions` is generally preferred now.
+        *   Need to format the prompt into the chat message structure (`messages=[{"role": "user", "content": prompt}]`).
+        *   Map our config to OpenAI parameters (temperature, top_p, max_tokens). Note `top_k` isn't standard in OpenAI chat API.
+        *   Handle API errors.
+
+7.  **Refine `load_model` Endpoint:**
+    *   The request body should still contain `model_name_or_path`.
+    *   The endpoint logic checks `settings.LLM_BACKEND_TYPE`.
+    *   If "local": Calls the existing local loading task (maybe renamed `_load_local_model_task`).
+    *   If "ollama" or "vllm":
+        *   Checks if the corresponding base URL is configured.
+        *   Updates `llm_state` with the chosen model name, backend type, and URL. Sets status to `LOADED` (since no real loading needed, just configuration/selection).
+        *   Maybe perform a quick health check ping to the API endpoint? (e.g., list models on Ollama/vLLM).
+
+8.  **Update API Models (`llm.py`):**
+    *   `ModelLoadRequest`: Keep `model_name_or_path`. Remove `device` and `quantization` as they are less relevant/handled differently for API backends (or make them optional).
+    *   `ModelStatusResponse`: Add `backend_type`, `backend_url`. Rename `model_name_or_path` to `active_model`.
+
+9.  **Refactor `sessions.py`:** No changes should be needed here, as it calls the abstracted `generate_text` from `llm_service`.
+
+10. **Testing:** Test each backend type:
+    *   Configure `LLM_BACKEND_TYPE="local"` -> load `gpt2` -> chat.
+    *   Configure `LLM_BACKEND_TYPE="ollama"`, `OLLAMA_BASE_URL="http://localhost:11434"` -> load `llama3` (assuming llama3 is served by local Ollama) -> chat.
+    *   Configure `LLM_BACKEND_TYPE="vllm"`, `VLLM_BASE_URL="http://localhost:8000"` -> load the model served by vLLM -> chat.
+
+11. **Review and Refine:** Look for code duplication, improve error handling, make parameter mapping robust. Ensure thread safety (passing config explicitly to `generate` helps). Ensure async operations (API calls) use `await`. Ensure local loading still uses `run_in_executor`.
+
+Okay, integrating external LLM inference servers like Ollama and vLLM alongside local loading requires adding a layer of abstraction. We need to configure which backend to use and then have our service call the appropriate interaction logic.
+
+Here's a plan:
+
+1.  **Configuration:** Add settings to choose the backend type (`local`, `ollama`, `vllm`) and specify base URLs for API backends.
+2.  **Abstraction Layer:** Define a base class or common structure for different LLM backends.
+3.  **Backend Implementations:** Create classes for `LocalTransformersBackend`, `OllamaBackend`, `VLLMBackend` (and potentially `InstructLabBackend` later).
+4.  **Refactor `llm_service.py`:** Modify it to manage the *active* backend instance based on configuration, rather than just the local pipeline. The `generate_text` function will delegate to the active backend.
+5.  **Update `load_model` Logic:** The `/load` endpoint will now configure the *model* for the *currently active backend type*. For API backends, this might just mean setting the model name to use in API calls. For local, it triggers the actual loading.
+6.  **Install `httpx`:** For making asynchronous HTTP requests to Ollama/vLLM.
+
+Let's implement this step-by-step.
+
+**Step 1: Install `httpx`**
+
+```bash
+pip install httpx
+```
+
+**Step 2: Update Configuration (`core/config.py`)**
+
+Add settings for backend selection and URLs.
+
+```python
+# core/config.py
+import os
+import torch
+from pydantic_settings import BaseSettings
+from pydantic import Field
+from pathlib import Path
+import tempfile
+from typing import Optional, List, Any, Literal # Import Literal
+
+# ... (get_default_device function) ...
+
+class Settings(BaseSettings):
+    # ... (General, DB, Embedding settings) ...
+
+    # --- LLM Settings ---
+    LLM_BACKEND_TYPE: Literal["local", "ollama", "vllm", "instructlab"] = Field(
+        default="local",
+        description="The type of LLM backend to use ('local', 'ollama', 'vllm', 'instructlab')."
+    )
+    # Base URLs for API backends (only needed if corresponding type is selected)
+    OLLAMA_BASE_URL: Optional[str] = Field(
+        default="http://localhost:11434", # Common default
+        description="Base URL for Ollama API (e.g., http://localhost:11434)."
+    )
+    VLLM_BASE_URL: Optional[str] = Field(
+        default=None, # No standard default, often runs on 8000
+        description="Base URL for vLLM OpenAI-compatible API (e.g., http://localhost:8000)."
+    )
+    INSTRUCTLAB_BASE_URL: Optional[str] = Field(
+        default=None, # No standard default
+        description="Base URL for InstructLab server API (if applicable)."
+    )
+    # Model name to use by default *on the configured backend*
+    # Can be overridden by the /load request
+    DEFAULT_MODEL_NAME_OR_PATH: str = Field(
+        default="gpt2", # A reasonable default for 'local'
+        description="Default model identifier (HF ID, local path, or name on API backend)."
+    )
+    # Local specific settings
+    LOCAL_MODELS_DIR: Path = BASE_DIR / "local_models"
+    LLM_DEVICE: str = Field(default_factory=get_default_device)
+    DEFAULT_LLM_QUANTIZATION: Optional[str] = Field(default=None)
+
+    # Generation parameters (used by all backends, potentially mapped)
+    DEFAULT_LLM_MAX_NEW_TOKENS: int = Field(default=512)
+    DEFAULT_LLM_TEMPERATURE: float = Field(default=0.7)
+    DEFAULT_LLM_TOP_P: float = Field(default=0.9)
+    DEFAULT_LLM_TOP_K: int = Field(default=50) # Note: Not used by standard OpenAI Chat API
+
+    # ... (ChromaDB, Document Processing, RAG/Chat settings) ...
+
+    class Config:
+        env_file = '.env'
+        env_file_encoding = 'utf-8'
+        extra = 'ignore'
+        # Allow reading Literal values case-insensitively if needed
+        # case_sensitive = False
+
+settings = Settings()
+
+# ... (Ensure directories exist) ...
+
+# --- Print relevant config ---
+print(f"--- Configuration Loaded ---")
+# ... (existing prints) ...
+print(f"LLM Backend Type: {settings.LLM_BACKEND_TYPE}") # Print backend type
+print(f"Default LLM Identifier: {settings.DEFAULT_MODEL_NAME_OR_PATH}")
+if settings.LLM_BACKEND_TYPE == 'ollama':
+    print(f"Ollama URL: {settings.OLLAMA_BASE_URL}")
+if settings.LLM_BACKEND_TYPE == 'vllm':
+    print(f"vLLM URL: {settings.VLLM_BASE_URL}")
+print(f"--------------------------")
+
+```
+*   Added `LLM_BACKEND_TYPE` using `Literal` for validation.
+*   Added base URLs for Ollama, vLLM, InstructLab.
+*   Renamed `DEFAULT_MODEL_NAME` to `DEFAULT_MODEL_NAME_OR_PATH` for clarity.
+
+**Step 3: Create Abstraction & Backends (`services/llm_backends.py`)**
+
+Create a new file `services/llm_backends.py`.
+
+```python
+# services/llm_backends.py
+import logging
+import abc # Abstract Base Classes
+from typing import Dict, Any, Optional, AsyncGenerator
+
+import httpx # For async API calls
+from core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# --- Base Class ---
+class LLMBackendBase(abc.ABC):
+    """Abstract base class for different LLM backends."""
+
+    @abc.abstractmethod
+    async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        """Generates text based on the prompt and configuration."""
+        pass
+
+    @abc.abstractmethod
+    def get_status_dict(self) -> Dict[str, Any]:
+        """Returns a dictionary representing the backend's current status."""
+        pass
+
+    async def unload(self):
+        """Optional method to clean up resources (e.g., unload local model)."""
+        logger.info(f"Unload called for {self.__class__.__name__}, default implementation does nothing.")
+        pass # Default does nothing
+
+
+# --- Local Transformers Backend ---
+# We'll integrate the existing logic from llm_service into this class later
+class LocalTransformersBackend(LLMBackendBase):
+    def __init__(self):
+        # This backend will hold the pipeline, tokenizer, etc.
+        # These will be populated by a dedicated loading function later
+        self.pipeline = None
+        self.tokenizer = None
+        self.model_name_or_path: Optional[str] = None
+        self.load_config: Dict[str, Any] = {}
+        self.max_model_length: Optional[int] = None
+        logger.info("LocalTransformersBackend initialized (inactive).")
+
+    async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        # This will contain the refined pipeline call logic from generate_text
+        if self.pipeline is None or self.tokenizer is None:
+            logger.error("Local pipeline/tokenizer not loaded.")
+            return None
+
+        try:
+            logger.info("Generating text with local Transformers pipeline...")
+            generation_keys = {"max_new_tokens", "temperature", "top_p", "top_k"}
+            generation_kwargs = {k: config[k] for k in generation_keys if k in config}
+            generation_kwargs["do_sample"] = True
+            generation_kwargs["num_return_sequences"] = 1
+            generation_kwargs["repetition_penalty"] = config.get("repetition_penalty", 1.15) # Example: get from config
+
+            logger.debug(f"Passing generation kwargs to pipeline: {generation_kwargs}")
+
+            # NOTE: Pipeline call itself is blocking CPU/GPU
+            # Needs to be run in executor by the caller (llm_service.generate_text)
+            outputs = self.pipeline(prompt, **generation_kwargs)
+
+            full_generated_text = outputs[0]['generated_text']
+            logger.debug(f"LLM Raw Output:\n{full_generated_text}")
+
+            # Use the prompt structure marker defined in sessions.py
+            response_marker = "\n### RESPONSE:" # Ensure this matches sessions.py
+            prompt_marker_pos = prompt.rfind(response_marker)
+
+            if prompt_marker_pos != -1:
+                 response_start_pos = prompt_marker_pos + len(response_marker)
+                 if full_generated_text.startswith(prompt[:response_start_pos]):
+                      result = full_generated_text[response_start_pos:].strip()
+                 else:
+                      logger.warning("Generated text didn't start with the expected prompt prefix. Using full generated text.")
+                      result = full_generated_text.strip()
+            else:
+                 logger.warning("Response marker not found in original prompt. Using full generated text.")
+                 result = full_generated_text.strip()
+
+            if not result:
+                 logger.warning("Extraction resulted in an empty string.")
+
+            logger.info("Local LLM text generation complete.")
+            return result
+
+        except Exception as e:
+            logger.error(f"Local LLM text generation failed: {e}", exc_info=True)
+            return None
+
+    def get_status_dict(self) -> Dict[str, Any]:
+         return {
+             "active_model": self.model_name_or_path,
+             "load_config": self.load_config,
+             "max_model_length": self.max_model_length,
+             # Add any other relevant local status info
+         }
+
+    async def unload(self):
+        """Unloads the local model and clears memory."""
+        logger.info(f"Unloading local model '{self.model_name_or_path}'...")
+        # Keep references to delete them explicitly
+        pipeline_to_del = self.pipeline
+        model_to_del = getattr(pipeline_to_del, 'model', None) if pipeline_to_del else None
+        tokenizer_to_del = self.tokenizer # Use self.tokenizer
+
+        self.pipeline = None
+        self.tokenizer = None
+        self.model_name_or_path = None
+        self.load_config = {}
+        self.max_model_length = None
+
+        del pipeline_to_del
+        del model_to_del
+        del tokenizer_to_del
+
+        import gc, torch # Import locally for unload
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("Local model unloaded and memory cleared.")
+
+
+# --- Ollama Backend ---
+class OllamaBackend(LLMBackendBase):
+    def __init__(self, base_url: str, model_name: str):
+        self.base_url = base_url.rstrip('/')
+        self.api_url = f"{self.base_url}/api/generate"
+        self.model_name = model_name
+        # Use a shared client for potential connection pooling
+        self.client = httpx.AsyncClient(timeout=120.0) # Increase timeout
+        logger.info(f"OllamaBackend initialized: URL='{self.base_url}', Model='{self.model_name}'")
+
+    async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        logger.info(f"Generating text via Ollama backend (model: {self.model_name})...")
+        # Map standard config keys to Ollama options
+        options = {
+            "temperature": config.get("temperature", settings.DEFAULT_LLM_TEMPERATURE),
+            "top_k": config.get("top_k", settings.DEFAULT_LLM_TOP_K),
+            "top_p": config.get("top_p", settings.DEFAULT_LLM_TOP_P),
+            "num_predict": config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS),
+            # Add other Ollama options if needed (e.g., stop sequences)
+            # "stop": ["\n###"]
+        }
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": False, # Request non-streaming response
+            "options": options,
+            # "raw": True # If prompt includes special formatting Ollama might remove
+        }
+        logger.debug(f"Ollama Request Payload: {payload}")
+
+        try:
+            response = await self.client.post(self.api_url, json=payload)
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+
+            result_data = response.json()
+            generated_text = result_data.get("response")
+            if generated_text:
+                logger.info("Ollama generation successful.")
+                logger.debug(f"Ollama Response: {generated_text[:500]}...")
+                return generated_text.strip()
+            else:
+                logger.error(f"Ollama response missing 'response' field. Full response: {result_data}")
+                return None
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Ollama API request failed (HTTP {e.response.status_code}): {e.response.text}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"Ollama API request failed (Network/Connection Error): {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Ollama generation failed unexpectedly: {e}", exc_info=True)
+            return None
+
+    def get_status_dict(self) -> Dict[str, Any]:
+        return {
+            "active_model": self.model_name,
+            "backend_url": self.base_url,
+            # Add check if Ollama server is reachable? Maybe later.
+        }
+
+    async def unload(self):
+        # Close the httpx client when unloading
+        await self.client.aclose()
+        logger.info("OllamaBackend httpx client closed.")
+
+# --- vLLM Backend (OpenAI Compatible) ---
+class VLLMBackend(LLMBackendBase):
+    def __init__(self, base_url: str, model_name: str):
+        # vLLM's OpenAI endpoint is usually at /v1
+        self.base_url = base_url.rstrip('/')
+        self.api_url = f"{self.base_url}/v1/chat/completions" # Use Chat Completion endpoint
+        self.model_name = model_name # This is passed in the payload
+        self.client = httpx.AsyncClient(timeout=120.0)
+        logger.info(f"VLLMBackend initialized: URL='{self.base_url}', Model='{self.model_name}' (using Chat API)")
+
+    async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        logger.info(f"Generating text via vLLM backend (model: {self.model_name})...")
+        # Format prompt for Chat Completion API
+        messages = [{"role": "user", "content": prompt}]
+
+        # Map config keys to OpenAI parameters
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "temperature": config.get("temperature", settings.DEFAULT_LLM_TEMPERATURE),
+            "top_p": config.get("top_p", settings.DEFAULT_LLM_TOP_P),
+            "max_tokens": config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS),
+            "stream": False,
+            # top_k is not standard for OpenAI Chat API
+            # Add other supported params if needed (e.g., stop)
+        }
+        logger.debug(f"vLLM Request Payload: {payload}")
+
+        try:
+            response = await self.client.post(self.api_url, json=payload)
+            response.raise_for_status()
+
+            result_data = response.json()
+            # Extract content from the first choice's message
+            if result_data.get("choices") and len(result_data["choices"]) > 0:
+                 message = result_data["choices"][0].get("message")
+                 if message and message.get("content"):
+                      generated_text = message["content"]
+                      logger.info("vLLM generation successful.")
+                      logger.debug(f"vLLM Response: {generated_text[:500]}...")
+                      return generated_text.strip()
+
+            logger.error(f"vLLM response missing expected structure. Full response: {result_data}")
+            return None
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"vLLM API request failed (HTTP {e.response.status_code}): {e.response.text}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"vLLM API request failed (Network/Connection Error): {e}")
+            return None
+        except Exception as e:
+            logger.error(f"vLLM generation failed unexpectedly: {e}", exc_info=True)
+            return None
+
+    def get_status_dict(self) -> Dict[str, Any]:
+         return {
+             "active_model": self.model_name,
+             "backend_url": self.base_url,
+         }
+
+    async def unload(self):
+        await self.client.aclose()
+        logger.info("VLLMBackend httpx client closed.")
+
+
+# --- InstructLab Backend (Placeholder) ---
+class InstructLabBackend(LLMBackendBase):
+    def __init__(self, base_url: str, model_name: str):
+        # Assuming similar OpenAI compatibility for now
+        self.base_url = base_url.rstrip('/')
+        self.api_url = f"{self.base_url}/v1/chat/completions" # Adjust if needed
+        self.model_name = model_name
+        self.client = httpx.AsyncClient(timeout=120.0)
+        logger.info(f"InstructLabBackend initialized: URL='{self.base_url}', Model='{self.model_name}'")
+
+    async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        # Implement similarly to VLLMBackend, adjust payload/response parsing if needed
+        logger.warning("InstructLabBackend generate() not fully implemented yet.")
+        # --- Placeholder Implementation (like VLLM) ---
+        messages = [{"role": "user", "content": prompt}]
+        payload = {
+            "model": self.model_name, "messages": messages,
+            "temperature": config.get("temperature", settings.DEFAULT_LLM_TEMPERATURE),
+            "top_p": config.get("top_p", settings.DEFAULT_LLM_TOP_P),
+            "max_tokens": config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS),
+            "stream": False,
+        }
+        try:
+            response = await self.client.post(self.api_url, json=payload)
+            response.raise_for_status()
+            result_data = response.json()
+            if result_data.get("choices") and result_data["choices"][0].get("message"):
+                return result_data["choices"][0]["message"].get("content", "").strip()
+            return None
+        except Exception as e:
+             logger.error(f"InstructLab generation failed: {e}", exc_info=True)
+             return None
+        # --- End Placeholder ---
+
+
+    def get_status_dict(self) -> Dict[str, Any]:
+         return {
+             "active_model": self.model_name,
+             "backend_url": self.base_url,
+         }
+
+    async def unload(self):
+        await self.client.aclose()
+        logger.info("InstructLabBackend httpx client closed.")
+
+```
+*   Creates `LLMBackendBase` ABC.
+*   Moves the refined local generation logic into `LocalTransformersBackend`. Adds an `unload` method.
+*   Implements `OllamaBackend` using `httpx` to call `/api/generate`.
+*   Implements `VLLMBackend` using `httpx` to call the OpenAI-compatible `/v1/chat/completions` endpoint.
+*   Adds a placeholder `InstructLabBackend`.
+*   Each backend implements `generate` and `get_status_dict`. API backends also implement `unload` to close the `httpx` client.
+
+**Step 4: Refactor `services/llm_service.py`**
+
+This service now acts as a manager for the *active* backend.
+
+```python
+# services/llm_service.py
+import time
+import logging
+import asyncio
+import gc
+import torch # Keep torch for CUDA checks
+from enum import Enum
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Union
+
+# Transformers needed only if local backend is used
+from transformers import pipeline, AutoTokenizer, BitsAndBytesConfig
+
+from core.config import settings
+# Import the backend classes
+from .llm_backends import (
+    LLMBackendBase,
+    LocalTransformersBackend,
+    OllamaBackend,
+    VLLMBackend,
+    InstructLabBackend
+)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- LLM Status Enum ---
+class LLMStatus(Enum):
+    INACTIVE = "Inactive" # No backend configured/active
+    LOADING = "Loading"   # Only for local backend
+    CONFIGURING = "Configuring" # For API backends (setting model)
+    READY = "Ready"       # Backend is configured and ready
+    FAILED = "Failed"     # Loading/Configuration failed
+    UNLOADING = "Unloading" # Only for local backend
+
+# --- LLM State ---
+# Stores the ACTIVE backend instance and global config
+llm_state: Dict[str, Any] = {
+    "backend_instance": None, # Holds the active backend object (Local, Ollama, etc.)
+    "backend_type": None,     # Which type is active ('local', 'ollama', ...)
+    "active_model": None,     # Name/path of the model active on the backend
+    "status": LLMStatus.INACTIVE,
+    "config": { # Global generation config, passed to backend
+        "max_new_tokens": settings.DEFAULT_LLM_MAX_NEW_TOKENS,
+        "temperature": settings.DEFAULT_LLM_TEMPERATURE,
+        "top_p": settings.DEFAULT_LLM_TOP_P,
+        "top_k": settings.DEFAULT_LLM_TOP_K,
+        "repetition_penalty": 1.15 # Keep this from previous fix
+    },
+    "last_error": None,
+}
+
+
+# --- Helper Functions (Scanning - keep as they are) ---
+# ... list_local_models() ...
+# ... list_cached_hub_models() ...
+
+
+# --- Internal Unload Function ---
+async def _unload_current_backend():
+    """Calls unload on the current backend instance if it exists."""
+    if llm_state["backend_instance"] is not None:
+        logger.info(f"Unloading current backend ({llm_state['backend_type']})...")
+        try:
+            await llm_state["backend_instance"].unload()
+        except Exception as e:
+             logger.error(f"Error during backend unload: {e}", exc_info=True)
+        finally:
+            llm_state["backend_instance"] = None
+            llm_state["backend_type"] = None
+            llm_state["active_model"] = None
+            llm_state["status"] = LLMStatus.INACTIVE
+            llm_state["last_error"] = None
+
+
+# --- Local Model Loading Task (Modified) ---
+# This now specifically targets the LocalTransformersBackend instance
+async def _load_local_model_task(
+    backend: LocalTransformersBackend, # Pass the backend instance
+    model_id: str,
+    device: str,
+    quantization: Optional[str]
+):
+    """Loads a model into the LocalTransformersBackend instance."""
+    task_start_time = time.time()
+    logger.info(f"[Local Loader] Starting task for '{model_id}' on device '{device}' q: '{quantization}'...")
+
+    # No need to unload here, unload is handled before calling this task if needed
+
+    llm_state["status"] = LLMStatus.LOADING # Update global status
+    llm_state["last_error"] = None
+    backend.model_name_or_path = model_id # Tentative assignment
+
+    try:
+        load_start_time = time.time()
+        quantization_config = None
+        pipeline_device_map = device if device != "cpu" else None
+        if quantization:
+             # ... (Quantization config logic - same as before) ...
+              if quantization == "8bit" and torch.cuda.is_available():
+                 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+                 logger.info("[Local Loader] Applying 8-bit quantization.")
+                 pipeline_device_map = "auto"
+              elif quantization == "4bit" and torch.cuda.is_available():
+                  quantization_config = BitsAndBytesConfig(
+                     load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
+                     bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
+                 )
+                  logger.info("[Local Loader] Applying 4-bit quantization (nf4).")
+                  pipeline_device_map = "auto"
+              else: # Fallback
+                 logger.warning(f"[Local Loader] Quantization '{quantization}' not supported/applicable. Loading full precision.")
+                 quantization = None
+
+        logger.info(f"[Local Loader] Loading tokenizer for '{model_id}'...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id, trust_remote_code=True,
+            cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve())
+        )
+        logger.info("[Local Loader] Tokenizer loaded.")
+
+        logger.info(f"[Local Loader] Initializing pipeline: model='{model_id}', device_map='{pipeline_device_map}', q_config={'Set' if quantization_config else 'None'}")
+        pipeline_instance = pipeline(
+            task="text-generation", model=model_id, tokenizer=tokenizer,
+            device_map=pipeline_device_map,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            quantization_config=quantization_config, trust_remote_code=True,
+        )
+        load_time = time.time() - load_start_time
+        logger.info(f"[Local Loader] Successfully loaded model '{model_id}' in {load_time:.2f}s.")
+
+        max_len = getattr(pipeline_instance.model.config, "max_position_embeddings", None) \
+                  or getattr(tokenizer, "model_max_length", None) \
+                  or 1024
+        logger.info(f"[Local Loader] Determined model max length: {max_len}")
+
+        # --- Update the specific backend instance ---
+        backend.pipeline = pipeline_instance
+        backend.tokenizer = tokenizer
+        backend.model_name_or_path = model_id # Confirm final name
+        backend.load_config = {"device": device, "quantization": quantization}
+        backend.max_model_length = max_len
+        # --- Update global state ---
+        llm_state["status"] = LLMStatus.READY
+        llm_state["active_model"] = model_id
+        llm_state["last_error"] = None
+
+    except Exception as e:
+        error_message = f"[Local Loader] Failed to load model '{model_id}': {type(e).__name__}: {e}"
+        logger.error(error_message, exc_info=True)
+        # Clear backend state
+        backend.pipeline = None
+        backend.tokenizer = None
+        backend.model_name_or_path = None
+        # Update global state
+        llm_state["status"] = LLMStatus.FAILED
+        llm_state["last_error"] = error_message
+        llm_state["active_model"] = None # Clear model name on failure
+
+    finally:
+        task_duration = time.time() - task_start_time
+        logger.info(f"[Local Loader] Task for '{model_id}' finished in {task_duration:.2f}s. Status: {llm_state['status'].value}")
+
+
+# --- Public Service Functions ---
+
+def get_llm_status() -> Dict[str, Any]:
+    """Returns the current status and configuration of the active LLM backend."""
+    status_copy = {
+        "backend_type": llm_state["backend_type"],
+        "active_model": llm_state["active_model"],
+        "status": llm_state["status"].value,
+        "generation_config": llm_state["config"],
+        "last_error": llm_state["last_error"],
+        "backend_details": None
+    }
+    if llm_state["backend_instance"] is not None:
+        # Get specific details from the active backend
+        status_copy["backend_details"] = llm_state["backend_instance"].get_status_dict()
+
+    return status_copy
+
+def update_llm_config(new_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Updates the global generation configuration."""
+    # Config applies globally, passed to whichever backend is active
+    allowed_keys = {"max_new_tokens", "temperature", "top_p", "top_k", "repetition_penalty"}
+    updated = False
+    for key, value in new_config.items():
+        if key in allowed_keys:
+            if key in llm_state["config"] and llm_state["config"][key] != value:
+                 logger.info(f"Updating global LLM generation config: {key} = {value}")
+                 llm_state["config"][key] = value
+                 updated = True
+        else:
+             logger.warning(f"Ignoring unsupported config key: {key}")
+    if not updated:
+         logger.info("No changes applied to LLM config.")
+    return llm_state["config"]
+
+# --- The core generation function ---
+# Now delegates to the active backend, running in executor if needed
+async def generate_text(prompt: str) -> Optional[str]:
+    """Generates text using the currently active LLM backend."""
+    backend = llm_state.get("backend_instance")
+    current_status = llm_state.get("status")
+
+    if current_status != LLMStatus.READY or backend is None:
+        logger.error(f"Cannot generate text: LLM backend not ready (Status: {current_status.value if current_status else 'N/A'}).")
+        return None
+
+    config = llm_state["config"] # Get current global config
+
+    try:
+        # Local backend's generate is blocking, API backends' generate is async
+        if isinstance(backend, LocalTransformersBackend):
+            logger.info("Running local generation in executor...")
+            loop = asyncio.get_running_loop()
+            # LocalBackend.generate is sync, run it in executor
+            result = await loop.run_in_executor(None, backend.generate, prompt, config) # Pass config
+        elif isinstance(backend, (OllamaBackend, VLLMBackend, InstructLabBackend)):
+            logger.info(f"Running API generation via {llm_state['backend_type']} backend...")
+            # API backend generate methods are already async
+            result = await backend.generate(prompt, config) # Pass config
+        else:
+             logger.error(f"Unknown backend type {type(backend)} cannot generate.")
+             result = None
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error during call to backend generate method: {e}", exc_info=True)
+        return None
+
+
+# --- Function to initiate backend loading/configuration ---
+# This replaces the direct call logic in the API endpoint
+async def set_active_backend(
+    backend_type: str,
+    model_name_or_path: str,
+    device: Optional[str] = None, # Primarily for local
+    quantization: Optional[str] = None # Primarily for local
+):
+    """Sets the active LLM backend, unloading previous one if necessary."""
+    logger.info(f"Request to set active backend: type='{backend_type}', model='{model_name_or_path}'")
+
+    # 1. Unload existing backend first
+    await _unload_current_backend()
+
+    # 2. Create and configure the new backend instance
+    new_backend: Optional[LLMBackendBase] = None
+    llm_state["status"] = LLMStatus.CONFIGURING # Or LOADING for local
+    llm_state["backend_type"] = backend_type
+    llm_state["active_model"] = model_name_or_path # Tentative
+    llm_state["last_error"] = None
+
+    try:
+        if backend_type == "local":
+            llm_state["status"] = LLMStatus.LOADING # Specific status for local
+            local_backend_instance = LocalTransformersBackend()
+            llm_state["backend_instance"] = local_backend_instance # Store instance before background task
+
+            # Run the actual loading in background executor
+            loop = asyncio.get_running_loop()
+            final_device = device or settings.LLM_DEVICE
+            final_quant = quantization # Uses request value directly, None if not provided
+            if quantization is None and settings.DEFAULT_LLM_QUANTIZATION is not None:
+                 final_quant = settings.DEFAULT_LLM_QUANTIZATION # Apply default if needed
+
+            logger.info(f"Scheduling local model load task: model='{model_name_or_path}', device='{final_device}', quantization='{final_quant}'")
+            # Use wrapper to run the async task in executor
+            def local_load_wrapper():
+                 asyncio.run(_load_local_model_task(local_backend_instance, model_name_or_path, final_device, final_quant))
+            loop.run_in_executor(None, local_load_wrapper)
+            # Status will be updated to READY/FAILED by the background task
+            return # Return early, loading happens in background
+
+        elif backend_type == "ollama":
+            if not settings.OLLAMA_BASE_URL:
+                raise ValueError("OLLAMA_BASE_URL not configured.")
+            new_backend = OllamaBackend(settings.OLLAMA_BASE_URL, model_name_or_path)
+            # TODO: Optionally ping Ollama API here to verify model exists?
+
+        elif backend_type == "vllm":
+             if not settings.VLLM_BASE_URL:
+                 raise ValueError("VLLM_BASE_URL not configured.")
+             new_backend = VLLMBackend(settings.VLLM_BASE_URL, model_name_or_path)
+             # TODO: Ping vLLM?
+
+        elif backend_type == "instructlab":
+            if not settings.INSTRUCTLAB_BASE_URL:
+                raise ValueError("INSTRUCTLAB_BASE_URL not configured.")
+            new_backend = InstructLabBackend(settings.INSTRUCTLAB_BASE_URL, model_name_or_path)
+            # TODO: Ping InstructLab?
+
+        else:
+            raise ValueError(f"Unsupported LLM_BACKEND_TYPE: {backend_type}")
+
+        # If we reached here, it's an API backend
+        llm_state["backend_instance"] = new_backend
+        llm_state["active_model"] = model_name_or_path # Confirm model
+        llm_state["status"] = LLMStatus.READY # API backends are 'ready' once configured
+        logger.info(f"Backend '{backend_type}' configured and ready with model '{model_name_or_path}'.")
+
+    except Exception as e:
+        error_message = f"Failed to configure backend '{backend_type}' with model '{model_name_or_path}': {e}"
+        logger.error(error_message, exc_info=True)
+        llm_state["status"] = LLMStatus.FAILED
+        llm_state["last_error"] = error_message
+        llm_state["backend_instance"] = None
+        llm_state["backend_type"] = None
+        llm_state["active_model"] = None
+        # Re-raise? Or just let status reflect failure? Let status reflect.
+
+```
+*   Imports backend classes.
+*   `llm_state` now holds `backend_instance`, `backend_type`, `active_model`. Status enum updated.
+*   `_unload_current_backend`: Helper to call `unload` on the current backend instance and reset state.
+*   `_load_local_model_task`: Now takes the specific `LocalTransformersBackend` instance to update. Updates state on success/failure.
+*   `get_llm_status`: Returns status including backend type and details from the active backend instance.
+*   `generate_text`: Now the main entry point. Checks status, gets the active backend instance, gets global config, and calls `backend.generate(prompt, config)`. Crucially, it uses `run_in_executor` *only* if the backend is `LocalTransformersBackend`, otherwise it directly `await`s the API backend's async `generate`.
+*   `set_active_backend`: New function orchestrating the switch. Unloads previous, creates the requested backend instance (or schedules local load), updates state.
+
+**Step 5: Update API Models (`app/api/models/llm.py`)**
+
+Adjust models to reflect the new state structure.
+
+```python
+# app/api/models/llm.py
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+# from services.llm_service import LLMStatus # No longer need Enum here
+
+class ModelLoadRequest(BaseModel):
+    # This name is now relative to the *configured backend type*
+    model_name_or_path: str = Field(..., description="Identifier for the model (HF ID, local path for 'local' backend; model name for 'ollama'/'vllm').")
+    # These are now only relevant for 'local' backend type
+    device: Optional[str] = Field(default=None, description="Local Only: Device ('cuda', 'cpu'). Overrides server default if backend is 'local'.")
+    quantization: Optional[str] = Field(default=None, description="Local Only: Quantization ('8bit', '4bit'). Overrides server default if backend is 'local'.")
+
+class BackendDetails(BaseModel):
+    # Example structure, might vary based on backend.get_status_dict() output
+    # For local:
+    active_model: Optional[str] = None
+    load_config: Optional[Dict[str, Any]] = None
+    max_model_length: Optional[int] = None
+    # For API:
+    backend_url: Optional[str] = None
+    # active_model is already top-level
+
+    class Config:
+        extra = 'allow' # Allow extra fields from backend status dicts
+
+
+class ModelStatusResponse(BaseModel):
+    backend_type: Optional[str] = None
+    active_model: Optional[str] = None # Model name active on the backend
+    status: str # Use the string value (e.g., "Ready", "Loading")
+    last_error: Optional[str] = None
+    generation_config: Optional[Dict[str, Any]] = None
+    backend_details: Optional[BackendDetails] = None # Specifics from backend
+
+class ModelUpdateRequest(BaseModel):
+    # This remains the same, updates the global config
+    max_new_tokens: Optional[int] = Field(default=None, ge=1)
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    top_k: Optional[int] = Field(default=None, ge=1)
+    repetition_penalty: Optional[float] = Field(default=None, ge=1.0)
+
+    def get_updates(self) -> Dict[str, Any]:
+        return self.dict(exclude_unset=True, exclude_none=True)
+
+
+class AvailableModelsResponse(BaseModel):
+    # Keep this as before
+    local_model_paths: List[str] = Field(description="Absolute paths to models found in the dedicated local_models directory.")
+    cached_hub_models: List[str] = Field(description="Model IDs found in the Hugging Face Hub cache directory.")
+
+```
+*   `ModelLoadRequest`: Clarified fields, device/quantization are local-only now.
+*   `ModelStatusResponse`: Updated fields to match new `llm_state` structure, added `backend_details`.
+*   `ModelUpdateRequest`: Added `repetition_penalty`.
+
+**Step 6: Update API Endpoint (`app/api/endpoints/models.py`)**
+
+Refactor the `/load` endpoint to use the new `set_active_backend` service function.
+
+```python
+# app/api/endpoints/models.py
+import logging
+import asyncio
+from typing import Dict, Any
+
+from fastapi import APIRouter, HTTPException, BackgroundTasks, status
+
+# Import models and service functions
+from app.api.models.llm import (
+    ModelLoadRequest, ModelStatusResponse, ModelUpdateRequest, AvailableModelsResponse
+)
+# Import new service function and updated status getter
+from services.llm_service import (
+    list_local_models, list_cached_hub_models,
+    set_active_backend, # <-- NEW import
+    get_llm_status, update_llm_config,
+    llm_state, LLMStatus # Keep state/enum for checking status
+)
+from core.config import settings
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# ... (@router.get("/available") remains the same) ...
+
+@router.post(
+    "/load",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Set active LLM backend and model", # Updated summary
+)
+async def load_or_set_model( # Renamed function for clarity
+    load_request: ModelLoadRequest,
+    background_tasks: BackgroundTasks, # Keep for potential future use, though less direct now
+):
+    """
+    Sets the active LLM backend based on server config (LLM_BACKEND_TYPE)
+    and configures it to use the specified model.
+    For 'local' backend, initiates background loading.
+    For API backends ('ollama', 'vllm', 'instructlab'), configures immediately.
+    Unloads any previously active backend first.
+    """
+    current_status = llm_state["status"]
+    # Prevent interfering with ongoing local load/unload
+    if current_status == LLMStatus.LOADING or current_status == LLMStatus.UNLOADING:
+         raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot change model/backend: Task already in progress (Status: {current_status.value}). Please wait."
+        )
+
+    backend_type = settings.LLM_BACKEND_TYPE # Get configured backend type
+    model_id = load_request.model_name_or_path
+    device = load_request.device # Pass along if provided (for local)
+    quantization = load_request.quantization # Pass along if provided (for local)
+
+    logger.info(f"Request received to activate model '{model_id}' on backend '{backend_type}'.")
+
+    # Use the service function to handle the logic
+    # This function is async because it might await the unload of the previous backend
+    try:
+        await set_active_backend(
+            backend_type=backend_type,
+            model_name_or_path=model_id,
+            device=device,
+            quantization=quantization
+        )
+    except ValueError as e: # Catch configuration errors from set_active_backend
+         logger.error(f"Configuration error setting backend: {e}")
+         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error setting backend: {e}", exc_info=True)
+        # Status should reflect failure from set_active_backend
+        raise HTTPException(status_code=500, detail="Failed to set active backend.")
+
+    # For API backends, status is READY immediately. For local, it's LOADING.
+    final_status = get_llm_status() # Get updated status
+    if final_status["status"] == LLMStatus.FAILED.value:
+         return {
+            "message": f"Backend configuration for '{model_id}' failed. Check server logs and status endpoint.",
+            "status": final_status
+         }
+    elif final_status["status"] == LLMStatus.LOADING.value:
+          return {
+            "message": f"Local model loading initiated for '{model_id}'. Check status endpoint.",
+            "status": final_status
+         }
+    else: # Should be READY for API backends
+        return {
+            "message": f"Backend '{backend_type}' configured with model '{model_id}'. Status: {final_status['status']}",
+            "status": final_status
+        }
+
+
+# ... (@router.get("/status") remains the same) ...
+# ... (@router.get("/config") remains the same) ...
+# ... (@router.put("/config") remains the same) ...
+
+```
+*   Imports `set_active_backend`.
+*   The `/load` endpoint now gets the `LLM_BACKEND_TYPE` from `settings`.
+*   It calls `await set_active_backend(...)`.
+*   It returns different messages based on whether it scheduled a background task (local) or configured an API backend immediately.
+
+**Step 7: Update `main.py` Shutdown**
+
+Ensure the new `unload` mechanism is called.
+
+```python
+# app/main.py
+# ... imports ...
+from services.system_service import shutdown_nvml
+# Import the specific service function
+from services.llm_service import _unload_current_backend # Import unload function
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Disconnect DB, shutdown NVML, unload LLM backend."""
+    print("--> Event: shutdown")
+    await disconnect_db()
+
+    print("--> Shutting down NVML...")
+    try:
+         shutdown_nvml()
+    except Exception as e:
+         print(f"--> WARNING: Error during NVML shutdown: {e}")
+
+    # --- ADDED: Unload active LLM backend ---
+    print("--> Unloading active LLM backend...")
+    try:
+        # Use the dedicated unload function from llm_service
+        await _unload_current_backend()
+        print("--> LLM backend unloaded.")
+    except Exception as e:
+        print(f"--> WARNING: Error during LLM backend unload: {e}")
+    # --- END ADDED ---
+
+    print("--> Event: shutdown complete.")
+
+# ... rest of main.py ...
+```
+
+**Testing the Multi-Backend Setup:**
+
+1.  **Configure:** Set `LLM_BACKEND_TYPE` in `.env` or environment variables.
+    *   **Local:** `LLM_BACKEND_TYPE=local`.
+    *   **Ollama:** `LLM_BACKEND_TYPE=ollama`, `OLLAMA_BASE_URL=http://your_ollama_host:11434`. Make sure Ollama is running and has the model you want to use (e.g., `ollama run llama3`).
+    *   **vLLM:** `LLM_BACKEND_TYPE=vllm`, `VLLM_BASE_URL=http://your_vllm_host:8000`. Make sure vLLM is running with the desired model.
+2.  **Restart Server:** `uvicorn app.main:app --reload ...`
+3.  **Load/Set Model:** Use `POST /api/v1/models/load`.
+    *   For `local`, provide HF ID or path (e.g., `{"model_name_or_path": "gpt2"}`). Status should go to `LOADING` then `READY`/`FAILED`.
+    *   For `ollama`, provide the model name Ollama uses (e.g., `{"model_name_or_path": "llama3"}`). Status should go to `READY` immediately (or `FAILED` if misconfigured).
+    *   For `vllm`, provide the model name vLLM expects (often the path it was loaded with, e.g., `{"model_name_or_path": "/path/to/model/on/vllm/server"}`). Status `READY`/`FAILED`.
+4.  **Check Status:** Use `GET /api/v1/models/status` to verify the backend type, active model, and status.
+5.  **Chat:** Create a session and send messages. The request should be routed to the currently configured backend. Check logs to confirm.
+6.  **Switch Backends:** Change the `LLM_BACKEND_TYPE` config, restart the server, load a relevant model, and test chat again.
+
+This provides a flexible architecture to switch between local inference and various dedicated inference servers. Remember the concurrency warning about modifying config for summarization if using the local backend.
+
+"why did you remove the tokenizer and pipeline from the llm_service.py llm_state?"
+
+1.  **Identify the core question:** The user noticed `pipeline` and `tokenizer` were removed from the *global* `llm_state` dictionary in `llm_service.py` in the multi-backend refactor, and wants to know why.
+
+2.  **Recall the previous state:** Before the refactor, `llm_service.py` *only* handled local Transformers models. The `llm_state` directly held the single loaded `pipeline` and `tokenizer` objects.
+
+3.  **Recall the refactored state:** In the multi-backend version:
+    *   `llm_state` now holds the *active backend instance* (`backend_instance`).
+    *   The specific details (like `pipeline`, `tokenizer`, `api_url`, etc.) are now stored *within* the corresponding backend class instance (`LocalTransformersBackend`, `OllamaBackend`, etc.).
+    *   `llm_service.py` acts as a manager, delegating tasks to the `backend_instance`.
+
+4.  **Formulate the explanation:**
+    *   **Reason 1: Abstraction:** The goal was to abstract *how* generation happens. Different backends (local pipeline, Ollama API, vLLM API) have different internal states and methods. A local backend needs `pipeline` and `tokenizer`, while an API backend needs a `base_url`, `model_name`, and an `httpx.AsyncClient`. Putting these *specific* details directly in the global `llm_state` would make it messy and violate the abstraction principle.
+    *   **Reason 2: Encapsulation:** Each backend class (`LocalTransformersBackend`, `OllamaBackend`) now *encapsulates* its own necessary state. The `LocalTransformersBackend` instance holds *its* pipeline and tokenizer. The `OllamaBackend` instance holds *its* client and URL. This is cleaner object-oriented design.
+    *   **Reason 3: Single Point of Responsibility:** The global `llm_state` is now responsible only for knowing *which* backend is active (`backend_instance`, `backend_type`), the *name* of the model being used (`active_model`), the overall `status`, the shared generation `config`, and any `last_error`. It doesn't need to know the internal implementation details of the active backend.
+    *   **How it's accessed:** When generation is needed, `generate_text` in `llm_service.py` gets the `backend_instance` from `llm_state` and calls *its* `.generate()` method. That specific backend's method then uses its *own* internal state (e.g., the `self.pipeline` for `LocalTransformersBackend` or `self.client` for `OllamaBackend`) to perform the task. Similarly, loading a *local* model involves getting the `LocalTransformersBackend` instance and updating its internal `pipeline` and `tokenizer`.
+
+5.  **Structure the answer:**
+    *   Acknowledge the user's correct observation.
+    *   State the main reason: moving to a multi-backend architecture required abstraction.
+    *   Explain that backend-specific state is now encapsulated within the backend *class instances*.
+    *   Detail *what* is stored in the backend instances vs. the global `llm_state`.
+    *   Explain how the global service interacts with the specific backend instance.
+    *   Conclude by summarizing the benefits (cleaner design, flexibility).
+  
+You are absolutely right to notice that! In the refactoring process for multi-backend support, the `pipeline` and `tokenizer` objects were **moved** from the *global* `llm_state` dictionary **into** the specific `LocalTransformersBackend` class instance.
+
+Here's the reasoning:
+
+1.  **Abstraction and Backend-Specific State:** The goal was to create a system where `llm_service.py` could manage different *types* of LLM backends (local, Ollama, vLLM).
+    *   Only the `local` backend actually *needs* a `transformers.pipeline` object and a `transformers.tokenizer` object loaded directly into the server's memory.
+    *   The `OllamaBackend` and `VLLMBackend` don't load these objects; they need things like an API base URL, a model name string (to pass to the API), and an `httpx` client for making requests.
+    *   Putting `pipeline` and `tokenizer` in the *global* `llm_state` wouldn't make sense when the active backend is Ollama or vLLM, as those slots would be unused or contain stale data.
+
+2.  **Encapsulation:** By creating backend classes (`LocalTransformersBackend`, `OllamaBackend`, etc.), we encapsulate the specific state needed by each backend *within its own instance*.
+    *   When the active backend is `local`, the `LocalTransformersBackend` instance stored in `llm_state["backend_instance"]` now holds `self.pipeline` and `self.tokenizer`.
+    *   When the active backend is `ollama`, the `OllamaBackend` instance stored in `llm_state["backend_instance"]` holds `self.base_url`, `self.model_name`, and `self.client`.
+
+3.  **Simplified Global State:** The global `llm_state` is now simpler and more generic. It only needs to track:
+    *   `backend_instance`: Which backend object is currently active.
+    *   `backend_type`: The type name ('local', 'ollama', etc.).
+    *   `active_model`: The name/ID of the model the active backend is configured to use.
+    *   `status`: The overall readiness status.
+    *   `config`: The *generation* parameters (like temp, max_tokens) which are applied globally, regardless of the backend.
+    *   `last_error`: Any error during loading/configuration.
+
+**How it Works Now:**
+
+*   When you request to load a model for the `local` backend, the `set_active_backend` function creates an instance of `LocalTransformersBackend` and stores it in `llm_state["backend_instance"]`. It then schedules the `_load_local_model_task` which, upon completion, populates `pipeline` and `tokenizer` *inside* that `LocalTransformersBackend` instance.
+*   When `generate_text` is called, it retrieves the active `backend_instance` from `llm_state`.
+*   It checks the type of the instance. If it's `LocalTransformersBackend`, it calls the `generate` method *of that instance*, which then uses its *own* `self.pipeline` and `self.tokenizer`.
+*   If the instance is `OllamaBackend`, it calls *its* `generate` method, which uses `self.client` to make an API call.
+
+This design makes the service much more flexible and easier to extend with new backend types in the future, as each backend manages its own specific requirements.
+
+"create a requirements.txt file with all of the pip installs for the full LLM Server we created"
+
+Here's a thinking process for generating the `requirements.txt`:
+
+1.  **Goal:** Create a `requirements.txt` file listing *all* the Python packages installed via `pip` during the development of the RAG LLM server.
+
+2.  **Recall Installed Packages:** Mentally (or by reviewing the conversation) list the `pip install` commands executed:
+    *   `fastapi uvicorn[standard]` (Base server)
+    *   `pydantic-settings python-dotenv sqlalchemy "databases[sqlite]" chromadb` (Config, DBs) - Note: `databases[sqlite]` pulls in `aiosqlite`.
+    *   `python-docx pypdf beautifulsoup4 lxml langchain-text-splitters python-magic aiofiles` (Doc processing)
+    *   `sentence-transformers torch torchvision torchaudio` (Embeddings) - Note: `sentence-transformers` pulls in `transformers`, `huggingface-hub`. `torch` often includes `numpy`.
+    *   `transformers accelerate bitsandbytes sentencepiece` (LLM loading/deps) - Note: `transformers` might be redundant if pulled by `sentence-transformers`, but good to list explicitly. `bitsandbytes` is OS/hardware specific.
+    *   `psutil pynvml` (System status) - Note: `pynvml` requires NVIDIA setup.
+    *   `httpx` (API clients for Ollama/vLLM)
+
+3.  **Consolidate and Refine:** Combine the lists and remove duplicates or implied dependencies if desired (though listing explicitly is often safer).
+    *   `fastapi`
+    *   `uvicorn[standard]` (Keeps useful extras)
+    *   `pydantic-settings`
+    *   `python-dotenv`
+    *   `SQLAlchemy` (Capitalization preferred)
+    *   `databases[sqlite]`
+    *   `chromadb`
+    *   `python-docx`
+    *   `pypdf`
+    *   `beautifulsoup4`
+    *   `lxml`
+    *   `langchain-text-splitters`
+    *   `python-magic`
+    *   `aiofiles`
+    *   `sentence-transformers`
+    *   `torch`
+    *   `torchvision`
+    *   `torchaudio`
+    *   `transformers`
+    *   `accelerate`
+    *   `bitsandbytes` (Add note about conditional need)
+    *   `sentencepiece`
+    *   `psutil`
+    *   `pynvml` (Add note about conditional need)
+    *   `httpx`
+
+4.  **Consider Versioning:** For reproducibility, specific versions are essential. However, since we didn't track exact versions during development, using `>=` or `~=` isn't feasible without running `pip freeze` on the actual environment. The request didn't ask for pinned versions, so listing just the package names is the most direct answer. Add a strong recommendation to pin versions using `pip freeze`.
+
+5.  **Add Context and Comments:** Explain the purpose of the file and how to use it. Add comments for packages with specific requirements (`bitsandbytes`, `pynvml`, `python-magic`). Mention the `pip freeze` recommendation.
+
+6.  **Format:** Present the list clearly, one package per line, following the `requirements.txt` convention. Use comments (`#`) for notes.
+
+7.  **Review:** Read through the list and comments. Does it cover all the functionality we built? Are the notes clear? Is the formatting correct? Ensure base dependencies like `pydantic` (pulled by `fastapi` and `pydantic-settings`) don't need explicit listing unless a specific version is required, but including core ones like `SQLAlchemy` and `transformers` is good practice. `uvicorn[standard]` pulls in things like `websockets`, `httptools`, `watchfiles`, etc. Listing the main component is usually sufficient unless specific versions of those sub-dependencies are needed.
+
+Okay, here is a `requirements.txt` file listing all the core Python packages we've installed throughout the development of this RAG LLM server.
+
+It's highly recommended to **pin the versions** for reproducible builds. You can generate a fully versioned file by activating your virtual environment and running `pip freeze > requirements.txt`. However, this list includes the necessary packages based on our steps:
+
+```txt
+# requirements.txt
+
+# --- Core Web Framework & Server ---
+fastapi
+uvicorn[standard] # Includes extras like websockets, watchfiles for reload
+
+# --- Configuration ---
+pydantic-settings
+python-dotenv
+
+# --- Databases ---
+sqlalchemy          # Core SQL toolkit
+databases[sqlite]   # Async database access + sqlite driver (aiosqlite)
+chromadb            # Vector database
+
+# --- Document Processing ---
+python-docx         # For .docx files
+pypdf               # For .pdf files
+beautifulsoup4      # For HTML/XML parsing
+lxml                # Parser often used with BeautifulSoup
+langchain-text-splitters # For text chunking algorithms
+python-magic        # For file type detection (requires libmagic system library)
+aiofiles            # For async file operations
+
+# --- Embedding Model ---
+sentence-transformers # Easy interface for embedding models
+# torch, torchvision, torchaudio are dependencies, usually installed together
+torch
+torchvision
+torchaudio
+
+# --- LLM Loading & Interaction ---
+transformers        # Hugging Face core library for models/pipelines
+accelerate          # Optimizes model loading/execution across devices
+bitsandbytes        # For 8-bit/4-bit quantization (optional, often needs Linux/NVIDIA)
+sentencepiece       # Tokenizer used by many models
+
+# --- API Clients (for External LLMs) ---
+httpx               # Async HTTP client for Ollama/vLLM APIs
+
+# --- System Status ---
+psutil              # Cross-platform system metrics (CPU, RAM, Disk)
+pynvml              # For NVIDIA GPU monitoring (optional, requires NVIDIA drivers/setup)
+
+```
+
+**How to Use:**
+
+1.  Save the content above into a file named `requirements.txt` in the root directory of your project (`rag_llm_server/`).
+2.  Ensure you have a virtual environment created and activated.
+3.  Run: `pip install -r requirements.txt`
+
+**Important Notes:**
+
+*   **Pinning Versions:** As mentioned, for production or sharing, replace this list with the output of `pip freeze` to lock down exact versions and ensure reproducibility.
+*   **`python-magic`:** Requires the `libmagic` library to be installed on your operating system (e.g., `sudo apt-get install libmagic1` on Debian/Ubuntu, `brew install libmagic` on macOS).
+*   **`bitsandbytes`:** Primarily works on Linux with compatible NVIDIA GPUs and CUDA setup. Installation might fail or the library might not be usable on other systems (like macOS or Windows without WSL).
+*   **`pynvml`:** Requires NVIDIA drivers and the NVML library to be properly installed and accessible on your system to report GPU stats. It will install but fail at runtime if the NVIDIA environment isn't set up.
+*   **`torch`:** The command `pip install torch torchvision torchaudio` usually installs the appropriate version (CPU or CUDA) for your system based on PyTorch's detection. If you have specific CUDA requirements, consult the official PyTorch installation guide.
+
+This file should cover all the functionality we've built into the server.
+
+"describe the setup procedure for creating a CUDA python virtual environment for an NVIDIA GPU"
+
+Here's a thinking process for generating the CUDA Python virtual environment setup guide:
+
+1.    **Understand the Goal:** The user wants to set up a Python virtual environment specifically configured to leverage an NVIDIA GPU using CUDA for tasks like machine learning (running PyTorch with CUDA support).
+
+2.    **Identify Prerequisites:** What needs to be true *before* starting the Python setup?
+    *   Hardware: An NVIDIA GPU. (Mention checking compatibility if unsure).
+    *   Operating System: Primarily Linux or Windows (WSL2 often recommended for Windows). macOS has limited/no direct NVIDIA CUDA support for recent hardware.
+    *   NVIDIA Drivers: The correct proprietary drivers must be installed. This is crucial. How does the user check/install? (Mention `nvidia-smi`, link to NVIDIA site).
+    *   CUDA Toolkit: While libraries like PyTorch often bundle *runtime* components, having the *full* toolkit installed system-wide can be beneficial for development or if libraries require specific compiler versions (`nvcc`). It's a point of frequent confusion – should it be installed separately? Acknowledge both approaches: PyTorch install handles most cases, but system install can be needed/helpful. Focus on the PyTorch route first as it's simpler.
+
+3.    **Choose Environment Management:** How should the user isolate this environment?
+    *   `venv`: Standard Python module. Good, lightweight.
+    *   `conda` (Miniconda/Anaconda): Very popular in data science, excellent at managing complex binary dependencies (like CUDA libraries alongside Python packages). Often *easier* for CUDA setups. Recommend `conda` as the preferred method due to its strengths here. Mention `venv` as an alternative but highlight potential complexities.
+
+4.    **Outline the `conda` Setup Steps:**
+    *   Install Miniconda/Anaconda (link to installers).
+    *   Create a new conda environment (command: `conda create -n my_cuda_env python=3.x`). Specify Python version (e.g., 3.10 or 3.11 are common).
+    *   Activate the environment (command: `conda activate my_cuda_env`).
+    *   **Crucial Step: Install PyTorch with CUDA.** This is the core.
+        *   Where to find the command? The official PyTorch website's "Get Started" page is the definitive source. *Must* emphasize this.
+        *   Provide an *example* command structure (e.g., `conda install pytorch torchvision torchaudio pytorch-cuda=11.x -c pytorch -c nvidia` or `pip install torch torchvision torchaudio --index-url ...`). Explain the components (`pytorch-cuda=11.x`, `-c pytorch`, `-c nvidia`). Mention matching the CUDA version (e.g., 11.8, 12.1) to the installed drivers. How to check driver CUDA compatibility? (`nvidia-smi`).
+    *   Install other necessary ML/DL packages (`pip install transformers accelerate bitsandbytes ...`). Mention using `pip` *within* the activated conda environment.
+    *   Verify the installation. How?
+        *   Start Python interpreter (`python`).
+        *   Import `torch`.
+        *   Check `torch.cuda.is_available()` -> Should be `True`.
+        *   Check `torch.cuda.device_count()` -> Should be > 0.
+        *   Check `torch.cuda.get_device_name(0)` -> Should show the GPU name.
+
+5.    **Outline the `venv` Setup Steps (Alternative/More Complex):**
+    *   Ensure system CUDA toolkit *and* cuDNN are installed and paths are configured (mention complexity).
+    *   Create the venv (`python -m venv my_cuda_env`).
+    *   Activate it (`source my_cuda_env/bin/activate` or `.\my_cuda_env\Scripts\activate`).
+    *   Install PyTorch using `pip`. Again, direct the user to the PyTorch website for the *correct* `pip` command with the appropriate `--index-url` for CUDA versions. Emphasize this is critical.
+    *   Install other packages (`pip install ...`).
+    *   Verify (same steps as conda).
+
+6.  **Add Important Considerations/Troubleshooting:**
+    *   **Driver/CUDA/PyTorch Version Compatibility:** This is the #1 source of problems. Reiterate checking `nvidia-smi` and using the PyTorch website command.
+    *   **Environment Variables:** Mention `PATH`, `LD_LIBRARY_PATH` (Linux), CUDA-related variables (often handled by conda/PyTorch install but good to know).
+    *   **WSL2 (Windows):** Specific instructions might be needed (installing drivers *on Windows*, CUDA toolkit *within WSL2*). Link to relevant guides if possible.
+    *   **Memory:** GPU memory requirements for models.
+    *   **`bitsandbytes`:** Linux dependency often.
+    *   **Clean Installation:** Starting fresh often helps.
+
+7.  **Structure and Formatting:**
+    *   Use clear headings and subheadings.
+    *   Use code blocks for commands.
+    *   Use bold text for emphasis (especially checking PyTorch site).
+    *   Provide links where appropriate.
+    *   Start with prerequisites.
+    *   Present `conda` first as recommended.
+    *   Present `venv` as the alternative.
+    *   Include verification steps.
+    *   Finish with troubleshooting/important notes.
+
+8.  **Review and Refine:** Read through the steps. Are they logical? Is the language clear? Is the most critical information (drivers, PyTorch command) emphasized sufficiently? Is the distinction between conda and venv for CUDA setups clear? (Self-correction: Initially, I might have undersold conda's advantage; make it clearer why it's often preferred). Ensure the verification steps are robust.
+
+Okay, setting up a Python virtual environment that correctly utilizes your NVIDIA GPU via CUDA involves a few critical steps, primarily ensuring compatibility between your NVIDIA driver, the CUDA toolkit version, and the deep learning framework (like PyTorch, which `transformers` uses).
+
+**Using `conda` (Recommended for CUDA Environments):**
+
+`conda` is generally recommended for managing environments with complex binary dependencies like CUDA libraries because it can manage non-Python packages alongside Python ones, often simplifying the process.
+
+**Prerequisites:**
+
+1.  **NVIDIA GPU:** You need a CUDA-capable NVIDIA GPU.
+2.  **NVIDIA Driver:** You **must** have the appropriate NVIDIA proprietary driver installed on your system (Linux or Windows). This is the most critical step.
+    *   **Check:** Open a terminal or command prompt and run `nvidia-smi`. If this command runs successfully and shows your GPU details, you have a driver installed. Note the `CUDA Version` listed in the top right – this is the *maximum* CUDA version your *driver* supports, not necessarily the version you need to install.
+    *   **Install/Update:** If `nvidia-smi` fails or the driver is very old, download and install the latest appropriate driver for your GPU model and OS from the [NVIDIA Driver Downloads page](https://www.nvidia.com/Download/index.aspx). Reboot after installation if required.
+3.  **Miniconda or Anaconda:** You need `conda` installed. Miniconda is a lighter-weight option. Download and install it from the [official Anaconda site](https://www.anaconda.com/download#installation) if you haven't already. Follow their OS-specific instructions.
+
+**Setup Steps using `conda`:**
+
+1.  **Open Terminal/Anaconda Prompt:** Use your standard terminal (Linux/macOS) or the "Anaconda Prompt" (Windows).
+
+2.  **Create a New Conda Environment:** Choose a name (e.g., `cuda_env`) and a Python version (3.10 or 3.11 are good choices currently).
+    ```bash
+    conda create -n cuda_env python=3.10
+    ```
+    Press `y` to proceed when prompted.
+
+3.  **Activate the Environment:**
+    ```bash
+    conda activate cuda_env
+    ```
+    Your terminal prompt should now start with `(cuda_env)`.
+
+4.  **Install PyTorch with CUDA Support (CRITICAL STEP):**
+    *   **Go to the official PyTorch website:** [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/)
+    *   **Use the Configuration Tool:** Select your OS, choose "Conda" as the package manager, choose your desired Python version (matching the one used in `conda create`), and select the **CUDA Version** you want to target.
+        *   **Which CUDA Version?** Check the output of `nvidia-smi` again. While it shows the *maximum* supported version, PyTorch often works well with slightly older, stable CUDA toolkit versions (e.g., 11.8, 12.1). The PyTorch website will show available pre-compiled versions. Pick one that is less than or equal to the version shown by `nvidia-smi`. For newer GPUs/drivers, CUDA 12.1+ is common. For slightly older ones, 11.8 might be offered.
+    *   **Copy the Command:** The website will generate a specific `conda install ...` command. **Use the command provided by the PyTorch website.** It will look something like this (***this is an EXAMPLE, use the one from the website!***):
+        ```bash
+        # Example for CUDA 11.8
+        conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+
+        # Example for CUDA 12.1
+        # conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+        ```
+        *   `-c pytorch -c nvidia`: Tells conda to look in the official PyTorch and NVIDIA channels for these packages.
+        *   `pytorch-cuda=11.8` (or `12.1`): This special package pulls in the necessary CUDA runtime libraries managed by conda, avoiding the need for a separate system-wide CUDA toolkit installation *for running PyTorch*.
+    *   **Run the command** in your activated environment. Agree to the installation (`y`). This might take some time as it downloads PyTorch and CUDA components.
+
+5.  **Install Other Dependencies:** Now install the rest of the packages needed for your server using `pip` (it's fine to use `pip` inside a conda environment):
+    ```bash
+    pip install -r requirements.txt
+    ```
+    (Make sure your `requirements.txt` file is up-to-date from the previous step). Or install manually:
+    ```bash
+    pip install fastapi uvicorn[standard] pydantic-settings python-dotenv sqlalchemy "databases[sqlite]" chromadb python-docx pypdf beautifulsoup4 lxml langchain-text-splitters python-magic aiofiles sentence-transformers transformers accelerate bitsandbytes sentencepiece httpx psutil pynvml
+    ```
+
+6.  **Verify CUDA Integration:**
+    *   Start a Python interpreter within the activated environment: `python`
+    *   Run the following commands:
+        ```python
+        import torch
+
+        # Check if CUDA is available to PyTorch
+        cuda_available = torch.cuda.is_available()
+        print(f"PyTorch CUDA available: {cuda_available}")
+
+        if cuda_available:
+            # Get the number of GPUs
+            num_gpus = torch.cuda.device_count()
+            print(f"Number of GPUs available: {num_gpus}")
+
+            # Get the name of the primary GPU
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"GPU Name: {gpu_name}")
+
+            # Optional: Check CUDA version PyTorch was compiled with
+            pytorch_cuda_version = torch.version.cuda
+            print(f"PyTorch compiled with CUDA Version: {pytorch_cuda_version}")
+        else:
+            print("CUDA not available to PyTorch. Check installation steps and driver compatibility.")
+
+        exit() # Exit the Python interpreter
+        ```
+    *   You **must** see `PyTorch CUDA available: True` for GPU acceleration to work.
+
+**Using `venv` (Standard Python Virtual Environment):**
+
+This method is possible but often trickier, as `venv` doesn't manage CUDA libraries. It relies on finding a system-wide CUDA Toolkit installation.
+
+**Prerequisites:**
+
+1.  **NVIDIA GPU & Driver:** Same as above. Run `nvidia-smi`.
+2.  **System-wide CUDA Toolkit Installation:** You generally need to have the full NVIDIA CUDA Toolkit installed separately on your system. Download it from the [NVIDIA CUDA Toolkit Archive](https://developer.nvidia.com/cuda-toolkit-archive). Choose a version compatible with your driver *and* the PyTorch version you intend to install. Make sure its `bin` directory is in your system's `PATH` and libraries are findable (e.g., `LD_LIBRARY_PATH` on Linux).
+3.  **cuDNN Installation:** You usually also need the corresponding cuDNN library installed and placed correctly within your CUDA Toolkit installation directories. Download from [NVIDIA cuDNN Archive](https://developer.nvidia.com/rdp/cudnn-archive).
+
+**Setup Steps using `venv`:**
+
+1.  **Open Terminal/Command Prompt.**
+2.  **Create Virtual Environment:**
+    ```bash
+    python -m venv cuda_venv
+    ```
+3.  **Activate Environment:**
+    *   Linux/macOS: `source cuda_venv/bin/activate`
+    *   Windows: `.\cuda_venv\Scripts\activate`
+4.  **Install PyTorch with CUDA (CRITICAL STEP):**
+    *   Go to the official PyTorch website: [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/)
+    *   Select your OS, choose **"Pip"** as the package manager, Python version, and the CUDA version matching your **system-wide CUDA Toolkit installation**.
+    *   Copy the specific `pip install torch ...` command provided. It will likely include an `--index-url` or `--extra-index-url` pointing to PyTorch's download servers for CUDA builds. ***This command is crucial. Do not just run `pip install torch`***. Example (use the one from the website!):
+        ```bash
+        # Example for CUDA 11.8 (check PyTorch site for current URL!)
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+        # Example for CUDA 12.1
+        # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+        ```
+    *   Run the command in your activated environment.
+4.  **Install Other Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+    Or install manually with `pip install ...`.
+5.  **Verify CUDA Integration:** Same verification steps as in the `conda` section (run `python`, import `torch`, check `torch.cuda.is_available()`, etc.).
+
+**Troubleshooting:**
+
+*   **`torch.cuda.is_available()` is `False`:**
+    *   Most likely cause: Incompatibility between NVIDIA Driver version, CUDA Toolkit version (either system-wide for `venv` or the `pytorch-cuda` package for `conda`), and the installed PyTorch version. Double-check compatibility and use the command from the PyTorch website.
+    *   Ensure the environment is activated correctly.
+    *   (venv specific): Check `PATH` and `LD_LIBRARY_PATH` environment variables point correctly to your system CUDA installation.
+*   **`nvidia-smi` works but PyTorch doesn't see CUDA:** Usually a version mismatch or installation issue with the PyTorch CUDA components. Reinstall PyTorch using the exact command from their website.
+*   **Environment Issues:** If things get messy, sometimes it's easiest to deactivate (`conda deactivate`), remove the environment (`conda env remove -n cuda_env`), and start fresh.
+
+Using `conda` significantly simplifies managing the CUDA library dependencies alongside PyTorch, making it the generally preferred route for GPU-accelerated Python environments.
+
+"how do I set the LLM Backend to an online LLM service using the POST? What am I passing as the path?"
+
+Here's a thinking process for answering the question about setting an online LLM service backend via the POST request:
+
+1.  **Identify the Goal:** The user wants to use the existing `/api/v1/models/load` POST endpoint to configure the server to use an *external* LLM service (like Ollama or vLLM) instead of loading a local model.
+
+2.  **Recall the API Endpoint Structure:** The relevant endpoint is `POST /api/v1/models/load`. The request body model is `ModelLoadRequest`.
+
+3.  **Recall the `ModelLoadRequest` Structure:** Check `app/api/models/llm.py`. The relevant fields are:
+    *   `model_name_or_path: str`: This is the primary identifier.
+    *   `device: Optional[str]`: Marked as "Local Only".
+    *   `quantization: Optional[str]`: Marked as "Local Only".
+
+4.  **Recall the Service Logic (`set_active_backend`):**
+    *   The function takes `backend_type`, `model_name_or_path`, `device`, `quantization`.
+    *   Crucially, `backend_type` is *not* passed in the request body. It's read from `settings.LLM_BACKEND_TYPE`.
+    *   `device` and `quantization` are used *only* if `backend_type == "local"`.
+    *   For API backends (Ollama, vLLM), the `model_name_or_path` from the request is used to initialize the specific backend instance (e.g., `OllamaBackend(settings.OLLAMA_BASE_URL, model_name_or_path)`).
+
+5.  **Synthesize the Process:**
+    *   **Server Configuration:** The *first* step is to configure the server itself to *know* it should be operating in, say, "ollama" mode. This is done by setting the `LLM_BACKEND_TYPE` environment variable (or in `.env`) *before* starting the server.
+    *   **API Call:** Once the server is running in the correct mode (e.g., `LLM_BACKEND_TYPE=ollama`), the user makes a `POST` request to `/api/v1/models/load`.
+    *   **Request Body Content:** The only *essential* piece of information in the request body for an API backend is the `model_name_or_path`. This should be the name of the model as recognized by the *remote* service (Ollama, vLLM). The `device` and `quantization` fields in the request body will be ignored if the server's `LLM_BACKEND_TYPE` is not `local`.
+    *   **Server Action:** The `load_or_set_model` endpoint calls `set_active_backend`. This function reads the pre-configured `settings.LLM_BACKEND_TYPE`. If it's "ollama", it creates an `OllamaBackend` instance, passing it the `settings.OLLAMA_BASE_URL` and the `model_name_or_path` received from the API request. It sets the status to `READY`.
+
+6.  **Formulate the Answer:**
+    *   Start by clarifying that setting the *type* of backend (local vs. online) is done via server configuration (`LLM_BACKEND_TYPE`), not the POST request itself.
+    *   Explain that the `POST /api/v1/models/load` endpoint is then used to specify *which model* that configured backend should use.
+    *   Detail the specific steps:
+        *   Configure `LLM_BACKEND_TYPE` (e.g., `ollama`) and the relevant URL (`OLLAMA_BASE_URL`) in `.env` or environment variables.
+        *   Restart the server so it picks up the new configuration.
+        *   Make the `POST` request to `/api/v1/models/load`.
+        *   Specify the `model_name_or_path` in the request body. Emphasize that this must be the name the *remote service* (Ollama, vLLM) recognizes.
+        *   Mention that `device` and `quantization` are ignored for API backends.
+    *   Provide concrete examples for Ollama and vLLM.
+    *   Explain what happens on the server side (unloading previous, creating new backend instance, setting status to `READY`).
+    *   Reinforce that the server is now *configured* to route subsequent chat requests to the specified online service using the chosen model name.
+
+7.  **Review and Refine:** Read through the explanation. Is it clear? Does it directly answer the user's question about what to pass? Does it correctly explain the role of server config vs. API request? Add bolding for key terms. Ensure the examples are clear.
+
+Okay, let's clarify how to use the `POST /api/v1/models/load` endpoint to connect to an online LLM service like Ollama or vLLM using the architecture we built.
+
+The key is understanding that the **type** of backend (local, ollama, vllm) is determined by the **server's configuration** (`settings.LLM_BACKEND_TYPE`), while the `POST /load` request tells the server **which specific model** to use *on that configured backend*.
+
+Here's the procedure:
+
+**1. Configure the Server:**
+
+*   **Choose Backend Type:** Decide which backend you want to use (e.g., `ollama`).
+*   **Set Environment Variables (or `.env` file):** Before starting the server, you need to tell it which backend type to use and provide the necessary URL.
+    *   **For Ollama:**
+        ```bash
+        # Set environment variables before running uvicorn
+        export LLM_BACKEND_TYPE="ollama"
+        export OLLAMA_BASE_URL="http://localhost:11434" # Or your Ollama server URL
+        # Now start the server
+        uvicorn app.main:app --reload ...
+        ```
+        Or, add these lines to your `.env` file:
+        ```.env
+        LLM_BACKEND_TYPE=ollama
+        OLLAMA_BASE_URL=http://localhost:11434
+        ```
+    *   **For vLLM:**
+        ```bash
+        # Set environment variables
+        export LLM_BACKEND_TYPE="vllm"
+        export VLLM_BASE_URL="http://localhost:8000" # Or your vLLM server URL
+        # Now start the server
+        uvicorn app.main:app --reload ...
+        ```
+        Or, add these lines to your `.env` file:
+        ```.env
+        LLM_BACKEND_TYPE=vllm
+        VLLM_BASE_URL=http://localhost:8000
+        ```
+*   **Restart Server:** If the server was already running, **restart it** so it picks up the new configuration from the environment variables or `.env` file. Check the startup logs to confirm it's using the correct `LLM Backend Type`.
+
+**2. Use the `POST /api/v1/models/load` Endpoint:**
+
+*   Now that the server knows it should be talking to Ollama (or vLLM), you use the `/load` endpoint to specify *which model on that remote server* you want to interact with.
+*   **Request Body:** You need to send a JSON body containing the `model_name_or_path`.
+    *   **`model_name_or_path`:** This value **must be the name of the model as recognized by the remote service**.
+        *   For **Ollama:** This is the model tag you use with `ollama run` or `ollama pull` (e.g., `"llama3"`, `"mistral"`, `"codellama:7b"`).
+        *   For **vLLM:** This often corresponds to the Hugging Face identifier or the path used when starting the vLLM server (e.g., `"meta-llama/Llama-2-7b-chat-hf"`, `"mistralai/Mistral-7B-Instruct-v0.1"`). Check your vLLM server's documentation or startup logs.
+    *   **`device` and `quantization`:** These fields in the request body are **ignored** when the server's `LLM_BACKEND_TYPE` is set to `ollama`, `vllm`, or `instructlab`. They only apply to the `local` backend. You can omit them or leave them as `null`.
+
+*   **Example Request (for Ollama, assuming server configured with `LLM_BACKEND_TYPE=ollama`):**
+    ```bash
+    curl -X 'POST' \
+      'http://localhost:YOUR_SERVER_PORT/api/v1/models/load' \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -d '{
+      "model_name_or_path": "llama3"
+    }'
+    ```
+
+*   **Example Request (for vLLM, assuming server configured with `LLM_BACKEND_TYPE=vllm`):**
+    ```bash
+    curl -X 'POST' \
+      'http://localhost:YOUR_SERVER_PORT/api/v1/models/load' \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -d '{
+      "model_name_or_path": "mistralai/Mistral-7B-Instruct-v0.1"
+    }'
+    ```
+
+**What Happens on the Server:**
+
+1.  The `load_or_set_model` endpoint receives the request.
+2.  It checks the *server's* configured `settings.LLM_BACKEND_TYPE`.
+3.  It calls `set_active_backend` with the type (e.g., "ollama") and the `model_name_or_path` from the request (e.g., "llama3").
+4.  `set_active_backend` unloads any previous backend.
+5.  It creates an instance of the appropriate backend class (e.g., `OllamaBackend(url, "llama3")`).
+6.  It stores this instance in `llm_state["backend_instance"]`.
+7.  It updates the global `llm_state` (`backend_type`, `active_model`, `status` to `READY`).
+8.  The API returns a 202 response confirming the backend is configured.
+
+Now, when you send messages to a chat session, the `generate_text` function in `llm_service` will see the active backend is `OllamaBackend` (or `VLLMBackend`) and will call *its* `generate` method, which in turn makes the API call to the external Ollama/vLLM server using the configured model name (`llama3` in the example).
+
+"Now, go through everything we have just created and provide citations and URL links where possible for any non-original content or code used throughout."
+
+Here's a thinking process for generating the citations/attributions list:
+
+1.  **Understand the Goal:** The user wants a list of citations and links for non-original code or concepts used in building the RAG LLM server. This is about giving credit and providing references for the tools and techniques employed.
+
+2.  **Review the Project Components:** Mentally (or actually) list the major parts of the server we built:
+    *   Web Framework (FastAPI)
+    *   Server Runner (Uvicorn)
+    *   Configuration (Pydantic, python-dotenv)
+    *   Database (SQLite via SQLAlchemy Core & `databases`, ChromaDB)
+    *   Document Loading/Parsing (python-docx, pypdf, beautifulsoup4, lxml, python-magic)
+    *   Text Chunking (LangChain)
+    *   Embedding (Sentence Transformers, PyTorch)
+    *   LLM Loading/Serving (Transformers, Accelerate, BitsAndBytes, PyTorch)
+    *   External LLM Clients (Ollama, vLLM via httpx)
+    *   System Monitoring (psutil, pynvml)
+    *   Core Concepts (RAG, Background Tasks, Async/Await, API Design)
+
+3.  **Go Through Each Component/Library:** For each item on the list, consider:
+    *   **What specific library was used?** (e.g., `fastapi`, `chromadb`, `sentence-transformers`).
+    *   **What was its primary purpose?** (e.g., web framework, vector DB, embeddings).
+    *   **Where would someone find official information?** (Usually the library's official documentation website or GitHub repository).
+    *   **Did we use specific code patterns or snippets *directly* inspired by documentation examples?** (Often yes, especially for initialization or basic usage).
+    *   **Did we use any specific algorithms or techniques with standard names?** (e.g., RAG, specific text splitting methods).
+
+4.  **Draft Entries for Each Library/Tool:**
+    *   **FastAPI:** Core framework. Link to its main page/docs. Mention its reliance on Starlette and Pydantic.
+    *   **Uvicorn:** ASGI server. Link to its docs/repo.
+    *   **Pydantic/pydantic-settings:** Data validation and configuration. Link to Pydantic docs.
+    *   **python-dotenv:** Loading `.env`. Link repo.
+    *   **SQLAlchemy:** SQL toolkit. Used Core. Link to SQLAlchemy docs.
+    *   **`databases` library:** Async DB interface. Link repo. Note `aiosqlite` dependency.
+    *   **ChromaDB:** Vector database. Link docs/repo. Mention `PersistentClient` and query methods.
+    *   **File Parsers:** List `python-docx`, `pypdf`, `beautifulsoup4`, `lxml`. Link their PyPI pages or docs. Mention their purpose.
+    *   **`python-magic`:** File type detection. Link repo. Mention `libmagic` dependency.
+    *   **`aiofiles`:** Async file I/O. Link repo.
+    *   **LangChain:** Specifically `langchain-text-splitters`. Mention `RecursiveCharacterTextSplitter`. Link to LangChain Python docs (maybe specifically the text splitters section if easy to find).
+    *   **Sentence Transformers:** Embedding generation. Link docs/repo. Mention loading model and `.encode()`.
+    *   **PyTorch:** Core ML framework, dependency for ST/Transformers. Link main site. Mention CUDA setup relevance.
+    *   **Transformers (Hugging Face):** Core library for LLMs. Link docs. Mention `pipeline`, `AutoTokenizer`, `AutoModelForCausalLM`, `generate`, `BitsAndBytesConfig`.
+    *   **Accelerate (Hugging Face):** Model loading/device mapping helper. Link docs/repo.
+    *   **BitsAndBytes:** Quantization library. Link repo. Mention CUDA dependency.
+    *   **`httpx`:** Async HTTP client for API backends. Link docs/repo.
+    *   **`psutil`:** System metrics. Link repo/docs.
+    *   **`pynvml`:** NVIDIA GPU metrics. Link PyPI/repo. Mention NVIDIA dependency.
+
+5.  **Consider Core Concepts/Techniques:**
+    *   **RAG (Retrieval-Augmented Generation):** This is a foundational concept. Link to a seminal paper (like the original RAG paper by Lewis et al.) or a good explanatory article/blog post from a reputable source (like Hugging Face or LangChain).
+    *   **FastAPI Background Tasks:** Used for document processing. Link to the relevant FastAPI documentation section.
+    *   **Asyncio (`run_in_executor`):** Used for running blocking tasks (embedding generation, local LLM inference) without blocking the event loop. Link to the Python `asyncio` documentation for executors.
+    *   **Dependency Injection (FastAPI):** Mentioned as a pattern (though not heavily used in the final code with global instances). Link FastAPI docs on dependencies.
+    *   **API Design (RESTful):** The structure follows general REST principles. No specific citation needed unless a particular design pattern was copied.
+
+6.  **Structure the Output:**
+    *   Start with a clear introductory statement.
+    *   Group citations by category (Core Framework, Databases, Document Processing, etc.) for readability.
+    *   For each item:
+        *   State the library/concept name clearly.
+        *   Briefly describe its purpose in the project.
+        *   Provide the primary URL (official documentation preferred, GitHub repo second).
+        *   Optionally mention specific functions or classes used if they are central (e.g., `pipeline`, `PersistentClient`, `RecursiveCharacterTextSplitter`).
+    *   Add concluding remarks about the iterative nature of development and standard practices.
+
+7.  **Review and Refine:**
+    *   Read through the generated list. Are the descriptions clear and accurate?
+    *   Are the links likely to be stable and point to the official source? (Avoid linking directly to specific version docs unless necessary, main docs page is better).
+    *   Is the formatting consistent?
+    *   Did I miss any major components? (Re-check the list from step 2).
+    *   Ensure the tone is appropriate – giving credit and providing resources.
+
+**(Self-Correction during review):** Initially, I might just list libraries. But the user asked for non-original *content* or *code*. So, I should explicitly mention *how* the library was used and link to documentation where similar patterns might be found (e.g., FastAPI background task docs, `run_in_executor` docs). Also, explicitly mentioning the RAG concept itself is important. Ensure URLs are to the main landing/documentation pages rather than potentially transient specific pages. Add notes about system dependencies (`libmagic`, CUDA, NVIDIA drivers).
+
+Okay, let's go through the components and concepts we used to build the RAG LLM server and provide citations or links to relevant resources where applicable. This acknowledges the great open-source libraries and common patterns leveraged in this project.
+
+**1. Core Framework & Server**
+
+*   **FastAPI:** Used as the main asynchronous web framework for building the API. Its design heavily influenced the endpoint structure, request/response handling, background tasks, and dependency injection concepts (though we used global instances for simplicity in some cases).
+    *   **Citation/URL:** [https://fastapi.tiangolo.com/](https://fastapi.tiangolo.com/)
+    *   **Note:** FastAPI itself builds upon Starlette (ASGI toolkit) and Pydantic (data validation).
+*   **Uvicorn:** The ASGI server used to run the FastAPI application. The `[standard]` extra includes `watchfiles` for the `--reload` functionality.
+    *   **Citation/URL:** [https://www.uvicorn.org/](https://www.uvicorn.org/) / [https://github.com/encode/uvicorn](https://github.com/encode/uvicorn)
+
+**2. Configuration**
+
+*   **Pydantic (& `pydantic-settings`):** Used for defining configuration models (`Settings` class) and validating environment variables/`.env` file settings.
+    *   **Citation/URL:** [https://docs.pydantic.dev/](https://docs.pydantic.dev/)
+*   **`python-dotenv`:** Used implicitly by `pydantic-settings` to load variables from a `.env` file into environment variables.
+    *   **Citation/URL:** [https://github.com/theskumar/python-dotenv](https://github.com/theskumar/python-dotenv)
+
+**3. Databases**
+
+*   **SQLAlchemy (Core):** Used to define the structure of the SQLite tables (`sessions`, `chat_messages`, `documents`, `document_chunks`) using its schema definition tools (`Table`, `Column`, `MetaData`).
+    *   **Citation/URL:** [https://www.sqlalchemy.org/](https://www.sqlalchemy.org/) / [https://docs.sqlalchemy.org/en/20/core/](https://docs.sqlalchemy.org/en/20/core/)
+*   **`databases` library:** Used for performing asynchronous database operations (connect, disconnect, execute, fetch) against the SQLite database, integrating well with FastAPI's async nature.
+    *   **Citation/URL:** [https://github.com/encode/databases](https://github.com/encode/databases)
+    *   **Note:** Relies on `aiosqlite` for the async SQLite driver (`databases[sqlite]`).
+*   **ChromaDB:** Used as the vector database for storing and searching document chunk embeddings. We used `chromadb.PersistentClient` and methods like `get_or_create_collection`, `add`, and `query`.
+    *   **Citation/URL:** [https://www.trychroma.com/](https://www.trychroma.com/) / [https://docs.trychroma.com/](https://docs.trychroma.com/) / [https://github.com/chroma-core/chroma](https://github.com/chroma-core/chroma)
+
+**4. Document Processing**
+
+*   **`python-docx`:** Used to extract text content from `.docx` files.
+    *   **Citation/URL:** [https://python-docx.readthedocs.io/en/latest/](https://python-docx.readthedocs.io/en/latest/)
+*   **`pypdf`:** Used to extract text content from `.pdf` files.
+    *   **Citation/URL:** [https://pypdf.readthedocs.io/en/stable/](https://pypdf.readthedocs.io/en/stable/)
+*   **`beautifulsoup4` (Beautiful Soup) & `lxml`:** Used to parse and extract text content from HTML files. `lxml` is a fast parser often used with BeautifulSoup.
+    *   **Citation/URL (BS4):** [https://www.crummy.com/software/BeautifulSoup/bs4/doc/](https://www.crummy.com/software/BeautifulSoup/bs4/doc/)
+    *   **Citation/URL (lxml):** [https://lxml.de/](https://lxml.de/)
+*   **`python-magic`:** Used for reliable file type detection based on file content (magic numbers) rather than just extensions.
+    *   **Citation/URL:** [https://github.com/ahupp/python-magic](https://github.com/ahupp/python-magic)
+    *   **Note:** Requires system-level `libmagic` library.
+*   **`aiofiles`:** Used for performing asynchronous file reading/writing operations, particularly useful within FastAPI's async environment (though we used standard `shutil` for simplicity in the final upload code).
+    *   **Citation/URL:** [https://github.com/Tinche/aiofiles](https://github.com/Tinche/aiofiles)
+*   **`langchain-text-splitters`:** Used specifically for the `RecursiveCharacterTextSplitter` algorithm to chunk documents into smaller pieces.
+    *   **Citation/URL:** [https://python.langchain.com/docs/modules/data_connection/document_transformers/text_splitters/recursive_text_splitter](https://python.langchain.com/docs/modules/data_connection/document_transformers/text_splitters/recursive_text_splitter) (LangChain documentation)
+
+**5. Embedding Model**
+
+*   **`sentence-transformers`:** Used as a high-level interface to load and use sentence embedding models (like `all-MiniLM-L6-v2`) from the Hugging Face Hub via the `SentenceTransformer` class and its `.encode()` method.
+    *   **Citation/URL:** [https://www.sbert.net/](https://www.sbert.net/) / [https://github.com/UKPLab/sentence-transformers](https://github.com/UKPLab/sentence-transformers)
+*   **PyTorch:** The underlying deep learning framework required by `sentence-transformers` and `transformers`. Handled CUDA device management (`torch.cuda.is_available`, tensors).
+    *   **Citation/URL:** [https://pytorch.org/](https://pytorch.org/)
+
+**6. LLM Loading & Interaction**
+
+*   **`transformers` (Hugging Face):** The core library used for loading LLMs (via `pipeline`, `AutoTokenizer`, `AutoModelForCausalLM`), tokenizing input, and generating text (`pipeline()` call, `model.generate()`).
+    *   **Citation/URL:** [https://huggingface.co/docs/transformers/index](https://huggingface.co/docs/transformers/index)
+*   **`accelerate` (Hugging Face):** Used implicitly or explicitly (e.g., `device_map='auto'`) by `transformers` to handle efficient model loading and placement across devices (CPU, GPU, multiple GPUs).
+    *   **Citation/URL:** [https://huggingface.co/docs/accelerate/index](https://huggingface.co/docs/accelerate/index)
+*   **`bitsandbytes`:** Used for enabling 8-bit and 4-bit model quantization via `transformers` `BitsAndBytesConfig` to reduce memory usage.
+    *   **Citation/URL:** [https://github.com/TimDettmers/bitsandbytes](https://github.com/TimDettmers/bitsandbytes)
+*   **`sentencepiece`:** A tokenizer library dependency required by many Hugging Face models.
+    *   **Citation/URL:** [https://github.com/google/sentencepiece](https://github.com/google/sentencepiece)
+*   **`httpx`:** Used as the asynchronous HTTP client library to interact with external LLM API endpoints (Ollama, vLLM).
+    *   **Citation/URL:** [https://www.python-httpx.org/](https://www.python-httpx.org/)
+
+**7. System Status**
+
+*   **`psutil`:** Used to gather cross-platform system information like CPU usage/frequency, RAM usage, disk usage, and potentially temperatures.
+    *   **Citation/URL:** [https://github.com/giampaolo/psutil](https://github.com/giampaolo/psutil) / [https://psutil.readthedocs.io/en/latest/](https://psutil.readthedocs.io/en/latest/)
+*   **`pynvml`:** Used to get detailed NVIDIA GPU information (memory, utilization, temperature) by interfacing with the NVIDIA Management Library (NVML).
+    *   **Citation/URL:** [https://github.com/gpuopenanalytics/pynvml](https://github.com/gpuopenanalytics/pynvml) / [https://pypi.org/project/pynvml/](https://pypi.org/project/pynvml/)
+    *   **Note:** Relies on NVIDIA drivers being installed.
+
+**8. Core Concepts & Patterns**
+
+*   **RAG (Retrieval-Augmented Generation):** The fundamental architecture combining retrieval (from ChromaDB) with generation (by the LLM).
+    *   **Citation/URL (Seminal Paper):** Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Nogueira, G., ... & Kiela, D. (2020). Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks. *arXiv preprint arXiv:2005.11401*. [https://arxiv.org/abs/2005.11401](https://arxiv.org/abs/2005.11401)
+    *   **Citation/URL (Explanations):** Hugging Face Blog posts, LangChain documentation on RAG.
+*   **FastAPI Background Tasks:** The pattern used for offloading document processing (chunking, embedding) after the initial upload request returned.
+    *   **Citation/URL:** [https://fastapi.tiangolo.com/tutorial/background-tasks/](https://fastapi.tiangolo.com/tutorial/background-tasks/)
+*   **Asyncio `run_in_executor`:** Used to run blocking, CPU/GPU-bound code (local LLM inference, summarization) in a separate thread pool without blocking the main FastAPI async event loop.
+    *   **Citation/URL:** [https://docs.python.org/3/library/asyncio-eventloop.html#executing-code-in-thread-or-process-pools](https://docs.python.org/3/library/asyncio-eventloop.html#executing-code-in-thread-or-process-pools)
+*   **Hugging Face Hub Cache Structure:** Understanding the `models--<org>--<model>` and `snapshots/<hash>` structure was used for scanning the cache. Documented implicitly via library usage.
+    *   **Citation/URL:** [https://huggingface.co/docs/huggingface_hub/guides/manage-cache](https://huggingface.co/docs/huggingface_hub/guides/manage-cache)
+*   **OpenAI-Compatible API:** The structure used for interacting with vLLM (and potentially InstructLab) follows the conventions established by OpenAI's API for chat completions.
+    *   **Citation/URL:** [https://platform.openai.com/docs/api-reference/chat](https://platform.openai.com/docs/api-reference/chat) / vLLM documentation on OpenAI compatibility.
+
+This list covers the primary external libraries and core concepts. Standard Python libraries (`os`, `datetime`, `logging`, `uuid`, `shutil`, `json`, `typing`, `abc`, `asyncio`, etc.) are generally not cited unless a very specific, non-obvious pattern was directly copied. The overall structure and integration logic represent the collaborative development process.
+
+"Generate a high level diagram for the over all Server Architecture illustrating how each component connects to one another. Then, create diagrams and data process flows for each component."
+
+Here's a breakdown of the thought process to generate the architecture diagrams and process flows:
+
+1.  **Understand the Request:** The user wants a high-level architecture diagram followed by more detailed diagrams and process flows for each major component of the RAG LLM server we built. The diagrams should show connections and data movement.
+
+2.  **Identify Major Components:** Review the features and code structure developed:
+    *   **API Layer (FastAPI):** The entry point for all external interactions.
+    *   **Configuration (`core/config.py`):** Central settings used by many components.
+    *   **Database (SQLite):** Stores metadata (documents, chunks, sessions, messages).
+    *   **Vector Store (ChromaDB):** Stores document/chunk embeddings.
+    *   **Document Processor (`services/document_processor.py`):** Handles upload, parsing, chunking.
+    *   **Embedding Service (`services/embedding_service.py`):** Loads embedding model, generates embeddings.
+    *   **LLM Service/Backends (`services/llm_service.py`, `llm_backends.py`):** Manages LLM loading (local/API), configuration, and generation.
+    *   **System Status Service (`services/system_service.py`):** Gathers system metrics.
+
+3.  **Plan Diagram Types:**
+    *   **High-Level Architecture:** A single diagram showing the main components and their primary relationships. Focus on subsystems rather than individual files/functions. Use boxes and arrows.
+    *   **Component Diagrams/Flows:** For each major *process* or *subsystem*, show:
+        *   The API endpoint(s) involved.
+        *   The sequence of actions/function calls.
+        *   Interactions with databases (SQLite, ChromaDB).
+        *   Interactions with external services (Ollama, vLLM APIs).
+        *   Key data transformations (e.g., file -> text -> chunks -> embeddings).
+        *   Use flow chart symbols (rectangles for processes, parallelograms for data I/O, cylinders for databases, arrows for flow).
+
+4.  **Draft High-Level Architecture Diagram:**
+    *   Start with the central "FastAPI Server" box.
+    *   Place "User/Client" outside, interacting via API.
+    *   Draw boxes for the key storage/processing units: SQLite, ChromaDB, Embedding Service, LLM Service (abstracting backends), Document Processor.
+    *   Add Configuration as a resource used by many.
+    *   Add System Status Service.
+    *   Draw arrows indicating primary interactions:
+        *   Client -> FastAPI
+        *   FastAPI -> Document Processor (via background task) -> SQLite, Embedding Service
+        *   FastAPI -> LLM Service -> (Local Loader / API Backends)
+        *   FastAPI -> Search (using Embedding Service, ChromaDB, SQLite)
+        *   FastAPI -> Session Mgmt -> SQLite
+        *   FastAPI -> System Status Service
+        *   Embedding Service -> ChromaDB
+        *   Document Processor -> SQLite
+        *   LLM Service (local) -> relies on loaded models/tokenizer
+        *   LLM Service (API) -> external APIs
+        *   System Status -> OS/Hardware/NVML
+    *   Keep it relatively clean, avoiding every single interaction detail. Label arrows clearly.
+
+5.  **Draft Component Diagrams/Flows (Iterative Process):**
+
+    *   **Document Ingestion:**
+        *   Trigger: `POST /documents/upload` API call with file data.
+        *   FastAPI saves temp file.
+        *   FastAPI creates initial record in SQLite (`documents` table, status='pending').
+        *   FastAPI schedules background task (`process_document_upload`).
+        *   *Background Task:*
+            *   Read temp file.
+            *   Detect file type (`python-magic`).
+            *   Update SQLite status ('processing').
+            *   Extract text (using `pypdf`, `python-docx`, etc.).
+            *   Update SQLite status ('chunking').
+            *   Chunk text (`RecursiveCharacterTextSplitter`).
+            *   Save chunks to SQLite (`document_chunks` table). Update status ('embedding').
+            *   Get embedding model (`embedding_service`).
+            *   Generate embeddings for chunks.
+            *   Add embeddings, chunk IDs, text, metadata to ChromaDB.
+            *   Update SQLite status ('completed'), store counts.
+            *   Handle errors (update SQLite status 'failed', log).
+            *   Clean up temp file.
+    *   **Search (Semantic):**
+        *   Trigger: `POST /documents/search/semantic` API call with query, `top_k`, filters.
+        *   FastAPI calls `embedding_service.generate_embeddings` for the query text.
+        *   FastAPI constructs ChromaDB `where` filter (if needed).
+        *   FastAPI calls `chromadb_collection.query()` with embedding, `n_results`, filter.
+        *   FastAPI receives results (IDs, distances, documents, metadatas).
+        *   FastAPI formats results into `SearchResponse`.
+        *   FastAPI returns response to client.
+    *   **Search (Keyword):**
+        *   Trigger: `POST /documents/search/keyword`.
+        *   FastAPI builds SQL `SELECT ... WHERE ... LIKE ...` query for `document_chunks` table in SQLite.
+        *   FastAPI applies filters (`document_ids`) and limits (`top_k`).
+        *   FastAPI executes query against SQLite (`database.fetch_all`).
+        *   FastAPI formats results.
+        *   FastAPI returns response.
+    *   **LLM Loading/Configuration:**
+        *   Trigger: `POST /models/load` API call with model ID, potentially local-specific options.
+        *   FastAPI checks `settings.LLM_BACKEND_TYPE`.
+        *   FastAPI calls `llm_service.set_active_backend`.
+        *   *`set_active_backend`:*
+            *   Calls `_unload_current_backend` (which cleans up local resources or closes HTTP clients).
+            *   If `local`: Creates `LocalTransformersBackend`, schedules `_load_local_model_task` in executor (which loads pipeline/tokenizer, updates local backend state, sets global status). Returns 202.
+            *   If `ollama`/`vllm`: Creates corresponding backend instance (with URL, model name), sets global status to READY. Returns 202/200.
+            *   Handles errors, sets status to FAILED.
+    *   **Chat Interaction (RAG + LLM):**
+        *   Trigger: `POST /sessions/{session_id}/messages` with user message.
+        *   FastAPI gets session data (including `rag_document_ids`) from SQLite.
+        *   FastAPI stores user message in SQLite (`chat_messages`).
+        *   FastAPI checks `rag_document_ids`.
+        *   *If RAG IDs exist:*
+            *   Calls `embedding_service.generate_embeddings` for user message.
+            *   Queries ChromaDB (using document ID filter).
+            *   (Optional Summarization): Loop through results -> `run_in_executor(summarize_text_with_query, ...)` which itself calls `llm_service.generate_text`.
+            *   Construct `rag_context` (from chunks or summaries).
+        *   Retrieves chat history from SQLite (`chat_messages`).
+        *   Constructs final `prompt_for_llm` (checking token limits with tokenizer from `llm_state`).
+        *   Calls `llm_service.generate_text(prompt_for_llm)`.
+        *   *`llm_service.generate_text`:*
+            *   Gets active `backend_instance` from `llm_state`.
+            *   Gets global `config`.
+            *   If `LocalTransformersBackend`: Calls `run_in_executor(backend.generate, prompt, config)`.
+            *   If `OllamaBackend` / `VLLMBackend`: Calls `await backend.generate(prompt, config)` (which makes HTTP call).
+            *   Returns generated text or `None`.
+        *   FastAPI receives response/`None`.
+        *   FastAPI stores assistant message (or error) in SQLite (`chat_messages`).
+        *   FastAPI returns assistant message to client.
+    *   **System Status:**
+        *   Trigger: `GET /system/status`.
+        *   FastAPI calls `system_service.get_full_system_status`.
+        *   *`get_full_system_status` calls:*
+            *   `get_cpu_status` (`psutil`).
+            *   `get_memory_status` (`psutil`).
+            *   `get_disk_status` (`psutil`).
+            *   `get_gpu_status` (`pynvml`, if available).
+            *   `get_temperature_status` (`psutil`, if available).
+        *   FastAPI receives dictionary of status data.
+        *   FastAPI validates/formats using `SystemStatusResponse.parse_obj`.
+        *   FastAPI returns response.
+
+6.  **Refine Diagrams:**
+    *   Use clear labels for boxes and arrows.
+    *   Ensure consistent terminology.
+    *   Use standard diagramming conventions where possible (though text-based diagrams have limitations).
+    *   Add notes where necessary (e.g., background tasks, executor usage, conditional steps).
+    *   Review for clarity and accuracy against the developed code. Ensure major interactions are captured.
+
+7.  **Format Output:** Present the diagrams clearly using text/ASCII art or markdown code blocks. Provide explanations for each diagram.
+
+Okay, let's visualize the architecture and data flows of the RAG LLM server we've built.
+
+**1. High-Level Server Architecture Diagram**
+
+This diagram shows the main subsystems and their primary interactions.
+
+```mermaid
+graph TD
+    subgraph Client_Side
+        User[User/Client Application]
+    end
+
+    subgraph FastAPI_Server [FastAPI Server (Python/Uvicorn)]
+        A[API Endpoints<br/>(FastAPI Routers)]
+        B[Configuration<br/>(core/config.py)]
+        C[Background Tasks<br/>(FastAPI)]
+        D[Services Layer]
+        E[Database Layer<br/>(SQLAlchemy Core + Databases Lib)]
+        F[Vector DB Client<br/>(ChromaDB Client)]
+        G[LLM Loader/Manager<br/>(Local/API Handling)]
+        H[Embedding Loader<br/>(SentenceTransformer)]
+    end
+
+    subgraph Storage
+        SQL[(SQLite DB<br/>Metadata, Sessions, Chunks)]
+        VDB[(ChromaDB<br/>Vector Embeddings)]
+    end
+
+    subgraph External_Services
+        ExtLLM[Ollama/vLLM/InstructLab API<br/>(Optional)]
+        HFModels[Hugging Face Hub<br/>(Model Downloads)]
+    end
+
+    subgraph System_Monitoring
+        SysMon[System Resources<br/>(psutil, pynvml)]
+    end
+
+    User -- HTTP API Requests --> A
+    A -- Uses --> B
+    A -- Triggers --> C
+    A -- Calls --> D
+    A -- Reads/Writes --> E
+    A -- Reads/Writes --> F
+    A -- Manages --> G
+    A -- Monitors --> SysMon
+
+    C -- Calls --> D[Document Processor, Embedding]
+
+    D -- Uses --> B
+    D -- Reads/Writes --> E
+    D -- Reads/Writes --> F
+    D -- Uses --> G
+    D -- Uses --> H
+    D -- Reads --> SysMon
+
+    E -- Interacts with --> SQL
+    F -- Interacts with --> VDB
+
+    G -- Loads/Interacts --> HFModels
+    G -- Interacts (Optional) --> ExtLLM
+    G -- Uses --> H[If loading local embedding model needs HF]
+
+    H -- Loads --> HFModels
+
+    style FastAPI_Server fill:#f9f,stroke:#333,stroke-width:2px
+    style Storage fill:#ccf,stroke:#333,stroke-width:1px
+    style External_Services fill:#ccf,stroke:#333,stroke-width:1px
+    style System_Monitoring fill:#cfc,stroke:#333,stroke-width:1px
+```
+
+**Explanation:**
+
+*   The **User** interacts with the **API Endpoints** built with FastAPI.
+*   These endpoints use **Configuration**, trigger **Background Tasks**, and call various functions in the **Services Layer**.
+*   The **Services Layer** contains the core logic (Document Processing, Embedding, LLM, System Status).
+*   Services interact with the **Database Layer** (for SQLite) and the **Vector DB Client** (for ChromaDB).
+*   The **LLM Loader/Manager** handles loading models either locally (potentially downloading from **Hugging Face Hub**) or configuring connections to **External LLM APIs**.
+*   The **Embedding Loader** loads the sentence transformer model, likely from the **Hugging Face Hub**.
+*   **System Monitoring** uses libraries to check underlying system resources.
+
+---
+
+**2. Component Diagrams & Data Flows**
+
+**2.1. Document Ingestion Flow**
+
+*   **Trigger:** `POST /api/v1/documents/upload` with file data.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API (FastAPI /documents)
+    participant SQLite (documents table)
+    participant BackgroundTask (document_processor)
+    participant TextExtractor (docx, pdf, etc.)
+    participant TextChunker (langchain)
+    participant SQLite (chunks table)
+    participant EmbeddingService
+    participant ChromaDB
+
+    Client ->>+ API: Upload File (e.g., doc.pdf)
+    API ->> API: Save to temp file (/tmp/...)
+    API ->>+ SQLite: INSERT document (id, filename, status='pending')
+    SQLite -->>- API: Confirm Insert
+    API -->>- Client: 202 Accepted (doc_id)
+    API ->> BackgroundTask: Schedule process_document_upload(temp_path, doc_id, filename)
+
+    Note over BackgroundTask: Runs asynchronously
+
+    BackgroundTask ->>+ SQLite: UPDATE document SET status='processing' WHERE id=doc_id
+    SQLite -->>- BackgroundTask: Confirm Update
+    BackgroundTask ->>+ TextExtractor: extract_text(temp_path)
+    TextExtractor -->>- BackgroundTask: extracted_text
+    BackgroundTask ->>+ SQLite: UPDATE document SET status='chunking' WHERE id=doc_id
+    SQLite -->>- BackgroundTask: Confirm Update
+    BackgroundTask ->>+ TextChunker: chunk_text(extracted_text)
+    TextChunker -->>- BackgroundTask: List[chunk_text]
+    BackgroundTask ->>+ SQLite: INSERT MANY chunks (chunk_id, doc_id, index, text)
+    SQLite -->>- BackgroundTask: Confirm Insert
+    BackgroundTask ->>+ SQLite: UPDATE document SET status='embedding', chunk_count=N WHERE id=doc_id
+    SQLite -->>- BackgroundTask: Confirm Update
+    BackgroundTask ->>+ EmbeddingService: generate_embeddings(List[chunk_text])
+    EmbeddingService -->>- BackgroundTask: List[embedding_vector]
+    BackgroundTask ->>+ ChromaDB: collection.add(ids=chunk_ids, embeddings=vectors, documents=chunks, metadatas=...)
+    ChromaDB -->>- BackgroundTask: Confirm Add
+    BackgroundTask ->>+ SQLite: UPDATE document SET status='completed', vector_count=N WHERE id=doc_id
+    SQLite -->>- BackgroundTask: Confirm Update
+    BackgroundTask ->> BackgroundTask: Delete temp file
+
+    alt On Error during processing
+        BackgroundTask ->>+ SQLite: UPDATE document SET status='failed', error_message=... WHERE id=doc_id
+        SQLite -->>- BackgroundTask: Confirm Update
+        BackgroundTask ->> BackgroundTask: Delete temp file
+    end
+
+```
+
+**2.2. Semantic Search Flow**
+
+*   **Trigger:** `POST /api/v1/documents/search/semantic` with query data.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API (FastAPI /documents)
+    participant EmbeddingService
+    participant ChromaDB
+
+    Client ->>+ API: POST SearchQuery(query, top_k, filters)
+    API ->>+ EmbeddingService: generate_embeddings([query_text])
+    EmbeddingService -->>- API: List[query_vector]
+    API ->> API: Build ChromaDB 'where' filter (optional)
+    API ->>+ ChromaDB: collection.query(query_embeddings, n_results, where=filter, include=...)
+    ChromaDB -->>- API: SearchResults (ids, distances, documents, metadatas)
+    API ->> API: Format results into List[ChunkResult]
+    API -->>- Client: 200 OK SearchResponse(results)
+
+    alt Embedding/Query Error
+        EmbeddingService -->> API: None / Exception
+        API -->> Client: 500 Internal Server Error
+    end
+    alt ChromaDB Error
+        ChromaDB -->> API: Exception
+        API -->> Client: 500 Internal Server Error
+    end
+```
+
+**2.3. LLM Loading Flow (Local Backend Example)**
+
+*   **Trigger:** `POST /api/v1/models/load` with `model_name_or_path`. (Server `LLM_BACKEND_TYPE` is `local`).
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API (FastAPI /models)
+    participant LLMService (set_active_backend)
+    participant LLMService (_unload_current_backend)
+    participant LLMService (Background Executor)
+    participant LLMService (_load_local_model_task)
+    participant LocalBackend (Instance)
+    participant TransformersLib
+
+    Client ->>+ API: POST ModelLoadRequest(model_id, device?, quant?)
+    API ->> API: Check if already Loading/Unloading (If yes, return 409)
+    API ->>+ LLMService: await set_active_backend(type='local', model_id, ...)
+    LLMService ->>+ LLMService (_unload_current_backend): await unload() [If previous backend exists]
+    LLMService (_unload_current_backend) ->> LocalBackend: await self.unload() [If prev was local]
+    LocalBackend -->> LLMService (_unload_current_backend): Cleanup done
+    LLMService (_unload_current_backend) -->>- LLMService: Unload complete
+    LLMService ->> LocalBackend: Create instance: backend = LocalTransformersBackend()
+    LLMService ->> LLMService: Update global state (status=LOADING, backend_instance=backend)
+    LLMService ->> LLMService (Background Executor): Schedule local_load_wrapper(backend, model_id, ...)
+    LLMService -->>- API: Return early (Loading scheduled)
+    API -->>- Client: 202 Accepted {"message": "Loading initiated..."}
+
+    Note right of LLMService (Background Executor): Runs in separate thread
+    LLMService (Background Executor) ->>+ LLMService (_load_local_model_task): asyncio.run(_load_local_model_task(backend, ...))
+    LLMService (_load_local_model_task) ->>+ TransformersLib: AutoTokenizer.from_pretrained(model_id)
+    TransformersLib -->>- LLMService (_load_local_model_task): tokenizer
+    LLMService (_load_local_model_task) ->>+ TransformersLib: pipeline(model=model_id, tokenizer=...)
+    TransformersLib -->>- LLMService (_load_local_model_task): pipeline_instance
+    LLMService (_load_local_model_task) ->> LocalBackend: Update instance: backend.pipeline = ..., backend.tokenizer = ...
+    LLMService (_load_local_model_task) ->> LLMService: Update global state (status=READY, active_model=...)
+    LLMService (_load_local_model_task) -->>- LLMService (Background Executor): Task complete
+
+    alt Loading Fails
+        LLMService (_load_local_model_task) ->> LocalBackend: Clear instance attributes (pipeline=None, etc.)
+        LLMService (_load_local_model_task) ->> LLMService: Update global state (status=FAILED, error=...)
+        LLMService (_load_local_model_task) -->>- LLMService (Background Executor): Task failed
+    end
+
+```
+
+**2.4. Chat Interaction Flow (with RAG & Summarization)**
+
+*   **Trigger:** `POST /api/v1/sessions/{session_id}/messages` with user message.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API (FastAPI /sessions)
+    participant SQLite (sessions, chat_messages)
+    participant EmbeddingService
+    participant ChromaDB
+    participant LLMService (summarize/generate)
+    participant LLMExecutor (Background Thread)
+    participant ActiveBackend (Local/Ollama/vLLM)
+
+
+    Client ->>+ API: POST user_message
+    API ->>+ SQLite: Fetch session data (incl. rag_doc_ids)
+    SQLite -->>- API: Session data
+    API ->>+ SQLite: INSERT user_message
+    SQLite -->>- API: Confirm insert, update session timestamp
+    API ->>+ EmbeddingService: generate_embeddings([user_message])
+    EmbeddingService -->>- API: query_embedding
+    API ->>+ ChromaDB: query(query_embedding, filter=rag_doc_ids)
+    ChromaDB -->>- API: retrieved_chunks (text, metadata)
+
+    loop For Each Retrieved Chunk
+        API ->>+ LLMExecutor: Schedule summarize_text_with_query(chunk_text, user_query)
+        LLMExecutor ->>+ LLMService: summarize_text_with_query(...)
+        LLMService ->>+ LLMService: generate_text(summary_prompt) [Uses temp config]
+            Note over LLMService: This might call executor again if backend is local
+            LLMService ->> ActiveBackend: generate(summary_prompt, temp_config)
+            ActiveBackend -->> LLMService: summary_text / None
+        LLMService -->>- LLMExecutor: summary_text / None
+        LLMExecutor -->>- API: summary_text / None
+        API ->> API: Append summary to context_parts
+    end
+
+    API ->> API: Combine summaries into rag_context
+    API ->>+ SQLite: Fetch chat_history for session
+    SQLite -->>- API: List[messages]
+    API ->> API: Get tokenizer, max_length from llm_state
+    API ->> API: Build final_prompt (Instruction, Summarized Context, History, Query)
+    API ->> API: Check/Truncate final_prompt based on token limits
+
+    API ->>+ LLMExecutor: Schedule generate_text(final_prompt)
+    LLMExecutor ->>+ LLMService: generate_text(final_prompt) [Uses main config]
+    LLMService ->> ActiveBackend: generate(final_prompt, main_config) [Direct await if API backend]
+    ActiveBackend -->> LLMService: assistant_response_text / None
+    LLMService -->>- LLMExecutor: assistant_response_text / None
+    LLMExecutor -->>- API: assistant_response_text / None
+
+    alt LLM Generation Fails
+        API ->> API: Set assistant_response_content = "[ERROR...]"
+        API ->> API: Record error in metadata
+    end
+
+    API ->>+ SQLite: INSERT assistant_message (content, metadata)
+    SQLite -->>- API: Confirm insert, update session timestamp
+    API -->>- Client: 201 Created (assistant_message details)
+
+```
+
+**2.5. System Status Flow**
+
+*   **Trigger:** `GET /api/v1/system/status`
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API (FastAPI /system)
+    participant SystemService (get_full_system_status)
+    participant psutil
+    participant pynvml (Optional)
+
+    Client ->>+ API: GET /status
+    API ->>+ SystemService: get_full_system_status()
+    SystemService ->>+ psutil: cpu_percent(), cpu_count(), cpu_freq()
+    psutil -->>- SystemService: CPU data
+    SystemService ->>+ psutil: virtual_memory()
+    psutil -->>- SystemService: Memory data
+    SystemService ->>+ psutil: disk_partitions(), disk_usage('/')
+    psutil -->>- SystemService: Disk data
+    opt pynvml Available
+        SystemService ->>+ pynvml: nvmlDeviceGetCount(), GetHandle(), GetName(), GetMemoryInfo(), GetUtilization(), GetTemperature()
+        pynvml -->>- SystemService: GPU data list
+    end
+    opt psutil Temp Sensors Available
+        SystemService ->>+ psutil: sensors_temperatures()
+        psutil -->>- SystemService: Temperature data
+    end
+    SystemService ->> SystemService: Assemble status dictionary
+    SystemService -->>- API: status_dict
+    API ->> API: Validate with SystemStatusResponse.parse_obj(status_dict)
+    API -->>- Client: 200 OK SystemStatusResponse
+
+    alt Error Getting Status
+        SystemService/psutil/pynvml -->> API: Exception
+        API -->> Client: 500 Internal Server Error
+    end
+```
+
+These diagrams illustrate the key interactions and data movements within the server architecture we've developed.
+
+INFO:     127.0.0.1:38752 - "GET /api/v1/models/status HTTP/1.1" 200 OK
+INFO:app.api.endpoints.models:Request received to activate model 'llama3' on backend 'ollama'.
+INFO:services.llm_service:Request to set active backend: type='ollama', model='llama3'
+INFO:services.llm_backends:OllamaBackend initialized: URL='http://127.0.0.1:11434', Model='llama3'
+INFO:services.llm_service:Backend 'ollama' configured and ready with model 'llama3'.
+INFO:     127.0.0.1:53756 - "POST /api/v1/models/load HTTP/1.1" 202 Accepted
+INFO:app.api.endpoints.sessions:[Session:9cf117da-2bd5-448b-9583-8eb2cceffabe] Stored user message (ID: 29).
+INFO:app.api.endpoints.sessions:[Session:9cf117da-2bd5-448b-9583-8eb2cceffabe] Performing RAG search within documents: ['61eccba3-49c5-418c-b5a3-e92166f763ce']
+INFO:services.embedding_service:Generating embeddings for 1 text chunks...
+INFO:services.embedding_service:Generated and converted 1 embeddings in 0.13 seconds.
+INFO:app.api.endpoints.sessions:[Session:9cf117da-2bd5-448b-9583-8eb2cceffabe] Retrieved 3 chunks for RAG context.
+INFO:app.api.endpoints.sessions:[Session:9cf117da-2bd5-448b-9583-8eb2cceffabe] Retrieved last 1 messages for history.
+INFO:app.api.endpoints.sessions:Constructing prompt for LLM...
+INFO:     127.0.0.1:41424 - "POST /api/v1/sessions/9cf117da-2bd5-448b-9583-8eb2cceffabe/messages HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py", line 426, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/uvicorn/middleware/proxy_headers.py", line 84, in __call__
+    return await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/applications.py", line 292, in __call__
+    await super().__call__(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/applications.py", line 122, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/errors.py", line 184, in __call__
+    raise exc
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/errors.py", line 162, in __call__
+    await self.app(scope, receive, _send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/exceptions.py", line 79, in __call__
+    raise exc
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/middleware/exceptions.py", line 68, in __call__
+    await self.app(scope, receive, sender)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/middleware/asyncexitstack.py", line 20, in __call__
+    raise e
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/middleware/asyncexitstack.py", line 17, in __call__
+    await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 718, in __call__
+    await route.handle(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/starlette/routing.py", line 66, in app
+    response = await func(request)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/routing.py", line 273, in app
+    raw_response = await run_endpoint_function(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/fastapi/routing.py", line 190, in run_endpoint_function
+    return await dependant.call(**values)
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 338, in add_message_to_session
+    if llm_status_data["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/enum.py", line 437, in __getattr__
+    raise AttributeError(name) from None
+AttributeError: LOADED
+
+Ah, this error indicates a slight mismatch between the Enum values we defined and how we're checking them.
+
+**Diagnosis:**
+
+1.  **Backend Configured:** The logs show the Ollama backend was successfully configured: `Backend 'ollama' configured and ready with model 'llama3'`.
+2.  **RAG Worked:** The RAG steps completed successfully.
+3.  **Error Location:** The error occurs in `sessions.py` during the prompt construction phase:
+    ```
+    File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 338, in add_message_to_session
+        if llm_status_data["status"] != LLMStatus.LOADED.value or not tokenizer or not max_length:
+    File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/enum.py", line 437, in __getattr__
+        raise AttributeError(name) from None
+    AttributeError: LOADED
+    ```
+4.  **Root Cause:** The traceback shows an `AttributeError: LOADED`. This means we are trying to access `LLMStatus.LOADED` (trying to get the Enum member itself) when the `LLMStatus` Enum defined in `services/llm_service.py` *doesn't have* a member named `LOADED`.
+5.  **Checking the Enum:** Looking back at our `LLMStatus` definition in `llm_service.py` (Step 4 of the multi-backend refactor):
+    ```python
+    # services/llm_service.py
+    class LLMStatus(Enum):
+        INACTIVE = "Inactive"
+        LOADING = "Loading"
+        CONFIGURING = "Configuring"
+        READY = "Ready"       # <--- We use READY for a successfully loaded/configured state
+        FAILED = "Failed"
+        UNLOADING = "Unloading"
+    ```
+    We defined `READY` as the status for when a backend (local or API) is successfully configured and available, not `LOADED`. The `LOADING` status is now specifically for the *process* of loading a *local* model.
+
+**Solution:**
+
+Update the status check in `add_message_to_session` within `app/api/endpoints/sessions.py` to check for `LLMStatus.READY` instead of `LLMStatus.LOADED`.
+
+```python
+# app/api/endpoints/sessions.py
+# ... (imports, including LLMStatus from llm_service) ...
+
+@router.post(
+    "/{session_id}/messages",
+    # ... (decorator) ...
+)
+async def add_message_to_session(
+    session_id: str,
+    message_data: MessageCreateRequest,
+):
+    # ... (message validation, get session, store user message) ...
+    # ... (RAG search logic) ...
+    # ... (Summarization logic) ...
+    # ... (Retrieve Chat History) ...
+
+    # --- Construct & Truncate Prompt ---
+    logger.info("Constructing final prompt using summarized context...")
+
+    # Get necessary info from LLM state
+    llm_status_data = get_llm_status()
+    tokenizer = llm_state.get("tokenizer") # Still relevant mainly for local/truncation
+    max_length = llm_state.get("max_model_length") # Still relevant mainly for local/truncation
+    model_name = llm_status_data.get("active_model", "N/A")
+
+    # --- CORRECT THE IF CONDITION BELOW ---
+    # Check if the status is READY
+    if llm_status_data["status"] != LLMStatus.READY.value: # Check for READY status
+        error_detail = f"LLM not ready (Status: {llm_status_data['status']}). Please load/configure a model first."
+        logger.warning(f"[Session:{session_id}] {error_detail}")
+        assistant_response_content = f"[ERROR: {error_detail}]"
+        # Need to initialize metadata here if erroring out early
+        assistant_message_metadata = {
+            "prompt_preview": "[ERROR: LLM not ready]",
+            "rag_chunks_retrieved": rag_chunk_ids, # Keep RAG info if available
+            "llm_call_error": error_detail
+        }
+        llm_ready = False # Flag to skip generation
+        # No prompt needed if we can't generate
+        prompt_for_llm = "[ERROR: LLM/Tokenizer not ready for prompt construction]"
+    # --- Handle potential missing tokenizer/max_length needed for truncation ---
+    # These are primarily needed if we need to truncate context/history for the prompt
+    # API backends might handle truncation server-side, but good practice to check here
+    elif not tokenizer or not max_length:
+         # Only critical if context/history is long and needs truncation
+         # For now, let's allow proceeding but log a warning if they are missing
+         # (relevant if switching from local to API backend without restarting server maybe?)
+         logger.warning("Tokenizer or max_length not found in llm_state, prompt truncation might be inaccurate if needed.")
+         llm_ready = True # Allow attempt, API backend might handle length
+         # Prompt construction continues below...
+    else:
+        llm_ready = True # Flag to indicate LLM is ready for prompt construction
+        # --- Define Prompt Components ---
+        # ... (rest of prompt construction logic using tokenizer/max_length for truncation) ...
+
+    # --- Call LLM Service (Checks llm_ready flag) ---
+    if llm_ready:
+        try:
+            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}' via backend '{llm_status_data['backend_type']}'...")
+            # ... (run_in_executor / await generate_text logic) ...
+        except Exception as e:
+            # ... (error handling for generation call) ...
+
+    # Ensure metadata is defined even if llm was not ready
+    if not llm_ready:
+        # We already set assistant_response_content and metadata earlier
+        pass
+    elif 'assistant_message_metadata' not in locals():
+         # Initialize metadata if generation path didn't run due to other issues
+          assistant_message_metadata = {
+             "prompt_preview": prompt_for_llm[:200] + "...",
+             "rag_chunks_retrieved": rag_chunk_ids,
+             "llm_call_error": "Unknown error before storing message"
+         }
+
+
+    # --- Store Assistant Message ---
+    # ... (store message logic) ...
+
+# ... (list_messages_in_session) ...
+```
+
+**Key Changes:**
+
+1.  **Status Check:** The main `if` condition now correctly checks `if llm_status_data["status"] != LLMStatus.READY.value:`.
+2.  **Error Message:** Updated the error message to reflect checking for `READY`.
+3.  **Tokenizer/Max Length Check:** Added a separate `elif` to handle cases where the tokenizer or max_length (needed for truncation) might be missing, even if the backend status is `READY`. For now, it logs a warning and allows proceeding, assuming API backends might handle length limits themselves. This could be made stricter if needed.
+4.  **Metadata Initialization:** Ensured `assistant_message_metadata` is initialized even if the `llm_ready` check fails early.
+
+**After Applying the Fix:**
+
+1.  Save the updated `app/api/endpoints/sessions.py`.
+2.  Restart Uvicorn.
+3.  Set the backend to `ollama` via config.
+4.  Load the `llama3` model using `POST /api/v1/models/load`. Verify status becomes `Ready`.
+5.  Create a session (linking the document).
+6.  Send the message.
+
+The `AttributeError` should be resolved, and the check for the LLM being ready should now use the correct `READY` status, allowing the request to proceed to the Ollama API call.
+
+"instead of using the .env file to change the LLM source, can we add some key/value pairs to the request body when we load the model? And, set the default to the local model settings?"
+
+Here's a breakdown of the thought process to modify the server to select the backend type via the API request:
+
+1.  **Understand the Goal:** The user wants to select the LLM backend (`local`, `ollama`, `vllm`) dynamically via the `POST /models/load` API call, rather than relying solely on server configuration (`.env` or environment variables). The server should default to the `local` backend if no type is specified in the request.
+
+2.  **Identify Affected Components:**
+    *   **Configuration (`core/config.py`):** The `LLM_BACKEND_TYPE` setting is no longer the *sole determinant*. It can serve as a default, but the API request needs to override it. We might keep it as a default fallback or remove it if the API *must* specify the type. Let's keep it as a default for now. The Base URLs (Ollama, vLLM) are still needed in the config. `DEFAULT_MODEL_NAME_OR_PATH` also remains relevant as a fallback if the API request doesn't specify a model.
+    *   **API Models (`app/api/models/llm.py`):** The `ModelLoadRequest` needs a new field to specify the desired `backend_type`. This field should be optional, defaulting to `local`.
+    *   **API Endpoint (`app/api/endpoints/models.py`):** The `load_or_set_model` endpoint needs to:
+        *   Accept the new `backend_type` from the request body.
+        *   Determine the final `backend_type` to use (request value, or server default `settings.LLM_BACKEND_TYPE`, or hardcoded 'local' default).
+        *   Pass this determined `backend_type` to the `set_active_backend` service function.
+    *   **Service Layer (`services/llm_service.py`):**
+        *   The `set_active_backend` function already accepts `backend_type` as an argument, so its signature is okay.
+        *   The global `llm_state` will store the `backend_type` that was *actually* activated.
+        *   The `get_llm_status` function already returns the active `backend_type`.
+    *   **Backend Implementations (`services/llm_backends.py`):** No changes needed here; they are instantiated based on the type passed to `set_active_backend`.
+
+3.  **Step-by-Step Implementation Plan:**
+
+    *   **Modify `core/config.py`:** Adjust the description of `LLM_BACKEND_TYPE` to indicate it's now a default/fallback.
+    *   **Modify `app/api/models/llm.py`:** Add `backend_type: Optional[Literal["local", "ollama", "vllm", "instructlab"]] = None` to `ModelLoadRequest`.
+    *   **Modify `app/api/endpoints/models.py` (`load_or_set_model`):**
+        *   Read `load_request.backend_type`.
+        *   Establish the precedence: Use `load_request.backend_type` if provided, otherwise fall back to `settings.LLM_BACKEND_TYPE`, potentially with a final fallback to `"local"`.
+        *   Pass the chosen `backend_type` to `await set_active_backend(...)`.
+    *   **Testing:** Test loading with and without the `backend_type` in the request body to verify default and override behavior.
+
+4.  **Refinement - Defaulting:** How should the default work precisely?
+    *   Should the API *require* the type? No, the request is to make it optional and default to local.
+    *   Should the server config `LLM_BACKEND_TYPE` be the primary default? Yes, that seems reasonable. If the user configured the server for Ollama by default, but doesn't specify in the API, it should still use Ollama.
+    *   What if the server config *isn't* set? Should it default to `local`? Yes, that's a safe fallback.
+
+    *Revised Default Logic in `load_or_set_model`*:*
+    ```python
+    requested_type = load_request.backend_type
+    config_default_type = settings.LLM_BACKEND_TYPE
+    final_backend_type = requested_type or config_default_type # Use request if provided, else config default
+    # Handle case where config default might also be invalid/None if not set strictly
+    if not final_backend_type:
+         final_backend_type = "local" # Ultimate fallback
+    ```
+    *Self-correction:* `Literal` in Pydantic/config will likely enforce that `settings.LLM_BACKEND_TYPE` *is* one of the valid types if set. So the fallback logic can be simpler: `final_backend_type = load_request.backend_type or settings.LLM_BACKEND_TYPE`.
+
+5.  **Refinement - Model Name:** The `model_name_or_path` also needs a default. If the request doesn't provide it, we should use `settings.DEFAULT_MODEL_NAME_OR_PATH`. This needs to be handled in the endpoint as well.
+
+6.  **Final Code Structure Review:** Look at the planned changes again. Do they interact correctly? Yes, the endpoint becomes the decision point for *which* backend type and *which* model ID to pass to the service layer, leveraging configuration for defaults. The service layer remains mostly unchanged in its core logic, just receiving the decided parameters.
+
+7.  **Write Code:** Implement the changes based on the refined plan. Add logging to show which backend type is being used (request override vs. config default).
+
+8.  **Document Testing:** Outline the test cases needed (no type in request, explicit type in request, no model name in request, etc.).
+
+Okay, let's modify the server to allow selecting the backend type via the API request body for `POST /models/load`, with `local` as the default if not specified.
+
+**1. Modify Configuration (`core/config.py`)**
+
+Adjust the description for `LLM_BACKEND_TYPE` to clarify its role as a default. The `DEFAULT_MODEL_NAME_OR_PATH` becomes more important as a fallback.
+
+```python
+# core/config.py
+# ... (imports) ...
+
+class Settings(BaseSettings):
+    # ... (other settings) ...
+
+    # --- LLM Settings ---
+    LLM_BACKEND_TYPE: Literal["local", "ollama", "vllm", "instructlab"] = Field(
+        default="local",
+        description="The default LLM backend to use if not specified in the /load request ('local', 'ollama', 'vllm', 'instructlab')." # Updated description
+    )
+    # Base URLs still needed from config
+    OLLAMA_BASE_URL: Optional[str] = Field(default="http://localhost:11434", ...)
+    VLLM_BASE_URL: Optional[str] = Field(default=None, ...)
+    INSTRUCTLAB_BASE_URL: Optional[str] = Field(default=None, ...)
+
+    DEFAULT_MODEL_NAME_OR_PATH: str = Field(
+        default="gpt2", # Default model if none specified in /load request
+        description="Default model identifier used if none is provided in the /load request (HF ID, local path, or name on API backend)." # Updated description
+    )
+    # Local specific settings remain
+    LOCAL_MODELS_DIR: Path = BASE_DIR / "local_models"
+    LLM_DEVICE: str = Field(default_factory=get_default_device)
+    DEFAULT_LLM_QUANTIZATION: Optional[str] = Field(default=None)
+
+    # Generation parameters remain
+    # ... (DEFAULT_LLM_MAX_NEW_TOKENS, etc.) ...
+
+    class Config:
+        # ... (Config remains same) ...
+
+settings = Settings()
+
+# ... (Ensure directories exist) ...
+# ... (Print relevant config) ...
+print(f"Default LLM Backend Type: {settings.LLM_BACKEND_TYPE}") # Clarify this is the default
+# ...
+
+```
+
+**2. Modify API Model (`app/api/models/llm.py`)**
+
+Add the optional `backend_type` field to `ModelLoadRequest`. Also make `model_name_or_path` optional, so we can rely on the default from `settings`.
+
+```python
+# app/api/models/llm.py
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Literal # Import Literal
+
+# ... (BackendDetails, ModelStatusResponse, ModelUpdateRequest, AvailableModelsResponse remain the same) ...
+
+class ModelLoadRequest(BaseModel):
+    # --- NEW: Optional backend type selection ---
+    backend_type: Optional[Literal["local", "ollama", "vllm", "instructlab"]] = Field(
+        default=None,
+        description="Specify the backend type to use. If None, uses the server's configured default."
+    )
+    # --- model_name_or_path is now optional ---
+    model_name_or_path: Optional[str] = Field(
+        default=None, # Default to None, will use server default if not provided
+        description="Identifier for the model (HF ID, path for 'local'; model name for API backends). If None, uses server's default model."
+    )
+    # Device/Quantization remain optional, only relevant for 'local'
+    device: Optional[str] = Field(default=None, ...)
+    quantization: Optional[str] = Field(default=None, ...)
+
+```
+
+**3. Modify API Endpoint (`app/api/endpoints/models.py`)**
+
+Update the `load_or_set_model` endpoint to handle the optional `backend_type` and `model_name_or_path` from the request.
+
+```python
+# app/api/endpoints/models.py
+import logging
+import asyncio
+from typing import Dict, Any
+
+from fastapi import APIRouter, HTTPException, BackgroundTasks, status
+
+# Import models and service functions
+from app.api.models.llm import (
+    ModelLoadRequest, ModelStatusResponse, ModelUpdateRequest, AvailableModelsResponse
+)
+from services.llm_service import (
+    list_local_models, list_cached_hub_models,
+    set_active_backend,
+    get_llm_status, update_llm_config,
+    llm_state, LLMStatus
+)
+from core.config import settings
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# ... (@router.get("/available") remains the same) ...
+
+@router.post(
+    "/load",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Set active LLM backend and model",
+)
+async def load_or_set_model(
+    load_request: ModelLoadRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Sets the active LLM backend and configures the model.
+    Uses backend_type from request body, or falls back to server default.
+    Uses model_name_or_path from request body, or falls back to server default.
+    For 'local' backend, initiates background loading.
+    Unloads any previously active backend first.
+    """
+    current_status = llm_state["status"]
+    if current_status == LLMStatus.LOADING or current_status == LLMStatus.UNLOADING:
+         raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot change model/backend: Task already in progress (Status: {current_status.value}). Please wait."
+        )
+
+    # --- Determine Backend Type and Model ---
+    # Use requested type, otherwise fall back to server's configured default type
+    backend_type = load_request.backend_type or settings.LLM_BACKEND_TYPE
+    # Use requested model, otherwise fall back to server's configured default model
+    model_id = load_request.model_name_or_path or settings.DEFAULT_MODEL_NAME_OR_PATH
+
+    # Ensure a valid model ID is determined
+    if not model_id:
+         raise HTTPException(
+            status_code=400,
+            detail="No model_name_or_path provided in request and no DEFAULT_MODEL_NAME_OR_PATH configured on server."
+        )
+
+    # Device/Quantization only relevant if final backend type is 'local'
+    device = load_request.device
+    quantization = load_request.quantization
+    # --- End Determination ---
+
+    logger.info(f"Request received to activate model '{model_id}' on effective backend '{backend_type}'.")
+    logger.debug(f" (Source: Request Type='{load_request.backend_type}', Server Default Type='{settings.LLM_BACKEND_TYPE}')")
+    logger.debug(f" (Source: Request Model='{load_request.model_name_or_path}', Server Default Model='{settings.DEFAULT_MODEL_NAME_OR_PATH}')")
+
+
+    try:
+        # Pass the *determined* backend_type and model_id to the service
+        await set_active_backend(
+            backend_type=backend_type,
+            model_name_or_path=model_id,
+            device=device, # Only used if backend_type is 'local'
+            quantization=quantization # Only used if backend_type is 'local'
+        )
+    except ValueError as e:
+         logger.error(f"Configuration error setting backend: {e}")
+         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error setting backend: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to set active backend.")
+
+    # Return status based on outcome
+    final_status = get_llm_status()
+    # ... (rest of the response logic based on final_status - unchanged) ...
+    if final_status["status"] == LLMStatus.FAILED.value:
+         return { # Return dict directly for 202 with body
+            "message": f"Backend configuration for '{model_id}' on '{backend_type}' failed. Check server logs and status endpoint.",
+            "status": final_status
+         }
+    elif final_status["status"] == LLMStatus.LOADING.value: # Only happens for local
+          return {
+            "message": f"Local model loading initiated for '{model_id}'. Check status endpoint.",
+            "status": final_status
+         }
+    else: # Should be READY for API backends or successful immediate local load (unlikely)
+        return {
+            "message": f"Backend '{backend_type}' configured with model '{model_id}'. Status: {final_status['status']}",
+            "status": final_status
+        }
+
+
+# ... (@router.get("/status") remains the same) ...
+# ... (@router.get("/config") remains the same) ...
+# ... (@router.put("/config") remains the same) ...
+
+```
+
+**Explanation of Changes:**
+
+1.  **Configuration:** `LLM_BACKEND_TYPE` in `settings` is now the *default* if the API request doesn't specify one. `DEFAULT_MODEL_NAME_OR_PATH` is the fallback model.
+2.  **API Model:** `ModelLoadRequest` now has optional `backend_type` and `model_name_or_path`.
+3.  **API Endpoint (`load_or_set_model`):**
+    *   It checks if `load_request.backend_type` was provided. If yes, it uses that. If `None`, it uses `settings.LLM_BACKEND_TYPE`.
+    *   It checks if `load_request.model_name_or_path` was provided. If yes, it uses that. If `None`, it uses `settings.DEFAULT_MODEL_NAME_OR_PATH`.
+    *   It passes these *determined* values (`backend_type`, `model_id`) to the `set_active_backend` service function.
+    *   Device/Quantization are passed along but are only really used by `set_active_backend` if the final `backend_type` is `local`.
+
+**How to Use:**
+
+*   **Default Behavior (Use Server Config):**
+    *   Configure your server via `.env` or env vars (e.g., `LLM_BACKEND_TYPE=local`, `DEFAULT_MODEL_NAME_OR_PATH=gpt2`).
+    *   Send a `POST /api/v1/models/load` request with an empty body `{}` or omit the optional fields:
+        ```json
+        {}
+        ```
+        or
+        ```json
+        {
+          "device": null,
+          "quantization": null
+        }
+        ```
+    *   The server will use `local` as the backend and `gpt2` as the model.
+
+*   **Override Model (Keep Server Default Backend):**
+    *   Server configured with `LLM_BACKEND_TYPE=local`.
+    *   Send request:
+        ```json
+        {
+          "model_name_or_path": "distilgpt2"
+        }
+        ```
+    *   The server will use the `local` backend but load `distilgpt2`.
+
+*   **Override Backend & Model:**
+    *   Server might be configured for `local`.
+    *   Ensure Ollama is running with `llama3`.
+    *   Send request:
+        ```json
+        {
+          "backend_type": "ollama",
+          "model_name_or_path": "llama3"
+        }
+        ```
+    *   The server will ignore its default `local` setting, activate the `OllamaBackend`, and configure it to use the `llama3` model via the Ollama API URL from the settings.
+
+*   **Override Backend (Use Default Model for that Backend):**
+    *   Server configured for `local`, `DEFAULT_MODEL_NAME_OR_PATH=gpt2`.
+    *   Ensure Ollama is running.
+    *   Send request:
+        ```json
+        {
+          "backend_type": "ollama"
+        }
+        ```
+    *   The server will activate the `OllamaBackend` but use the *server's* `DEFAULT_MODEL_NAME_OR_PATH` ("gpt2" in this case) as the model name for Ollama API calls. **Note:** This requires the default model name to be valid for the chosen backend! It might be better practice to always specify the model when changing the backend type.
+
+This gives you the flexibility to switch models and target different running inference servers dynamically via the API, while still having sensible server-side defaults.
+
+Why is the 'models' enpoint throwing this error:
+
+Attempting to import 'models' endpoint module...
+FAILED to import 'models' with unexpected error: positional argument follows keyword argument (llm.py, line 18)
+
+###Here is the log:
+
+(cuda_env) ken@ken-Precision-7680:~/Documents/gestalt/rag_llm_server_extended$ uvicorn app.main:app --reload --reload-dir app --reload-dir core --reload-dir db --reload-dir services
+INFO:     Will watch for changes in these directories: ['/home/ken/Documents/gestalt/rag_llm_server_extended/app', '/home/ken/Documents/gestalt/rag_llm_server_extended/core', '/home/ken/Documents/gestalt/rag_llm_server_extended/db', '/home/ken/Documents/gestalt/rag_llm_server_extended/services']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [494094] using WatchFiles
+Project root added to sys.path: /home/ken/Documents/gestalt/rag_llm_server_extended
+--------------------
+Attempting to import 'documents' endpoint module...
+--- Configuration Loaded ---
+SQLite DB URL: sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server_extended/data/rag_server.db
+ChromaDB Path: /home/ken/Documents/gestalt/rag_llm_server_extended/data/chroma_db
+Upload Dir: /tmp/rag_server_uploads
+Embedding Model: all-MiniLM-L6-v2 on cuda
+Local Models Dir: /home/ken/Documents/gestalt/rag_llm_server_extended/local_models
+LLM Device: cuda
+LLM Backend Type: local
+Default LLM Identifier: gpt2
+--------------------------
+ChromaDB persistent client initialized. Path: /home/ken/Documents/gestalt/rag_llm_server_extended/data/chroma_db
+/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/pydantic/_internal/_config.py:345: UserWarning: Valid config keys have changed in V2:
+* 'allow_population_by_field_name' has been renamed to 'populate_by_name'
+* 'orm_mode' has been renamed to 'from_attributes'
+  warnings.warn(message, UserWarning)
+SUCCESS: Imported 'documents' module.
+  -> Type: <class 'module'>
+  -> Has 'router' attribute: True
+--------------------
+Attempting to import 'sessions' endpoint module...
+/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/pydantic/_internal/_config.py:345: UserWarning: Valid config keys have changed in V2:
+* 'orm_mode' has been renamed to 'from_attributes'
+  warnings.warn(message, UserWarning)
+SUCCESS: Imported 'sessions' module.
+  -> Type: <class 'module'>
+  -> Has 'router' attribute: True
+--------------------
+Attempting to import 'models' endpoint module...
+FAILED to import 'models' with unexpected error: positional argument follows keyword argument (llm.py, line 18)
+--------------------
+Attempting to import 'system' endpoint module...
+INFO:services.system_service:pynvml initialized successfully.
+SUCCESS: Imported 'system' module.
+  -> Type: <class 'module'>
+  -> Has 'router' attribute: True
+--------------------
+Creating FastAPI app instance...
+FastAPI app instance created.
+--------------------
+Including 'documents' router...
+SUCCESS: Included 'documents' router.
+--------------------
+Including 'sessions' router...
+SUCCESS: Included 'sessions' router.
+--------------------
+SKIPPING 'models' router inclusion (module or router attribute not found).
+--------------------
+Including 'system' router...
+SUCCESS: Included 'system' router.
+--------------------
+--- End of main.py ---
+INFO:     Started server process [494096]
+INFO:     Waiting for application startup.
+--> Event: startup
+INFO:databases:Connected to database sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server_extended/data/rag_server.db
+Database connection established.
+--> Pre-loading embedding model...
+INFO:services.embedding_service:Loading embedding model 'all-MiniLM-L6-v2' onto device 'cuda'...
+INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+INFO:services.embedding_service:Embedding model loaded successfully in 0.92 seconds.
+--> Embedding model loading initiated.
+--> Event: startup complete.
+INFO:     Application startup complete.
+
+This error message is very specific and points directly to the cause:
+
+```
+FAILED to import 'models' with unexpected error: positional argument follows keyword argument (llm.py, line 18)
+```
+
+This means that when Python was trying to *import* the `app/api/endpoints/models.py` file, that file in turn tried to import something from `app/api/models/llm.py`. During the processing of `llm.py`, Python encountered a syntax error on **line 18** of that file (`llm.py`).
+
+The error `SyntaxError: positional argument follows keyword argument` happens when you call a function or define a class field where you provide arguments by position *after* you've already provided an argument by keyword (using `name=value`).
+
+**Let's look at line 18 (approximately) in `app/api/models/llm.py` from our last revision:**
+
+```python
+# app/api/models/llm.py
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Literal # Import Literal
+
+# (Other models: BackendDetails, ModelStatusResponse, etc)
+# Let's assume ModelUpdateRequest starts around line ~15
+
+class ModelUpdateRequest(BaseModel):
+    # This remains the same, updates the global config
+    max_new_tokens: Optional[int] = Field(default=None, ge=1) # ~Line 17
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0) # <--- Line 18 (Likely culprit)
+    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0) # ~Line 19
+    # ... rest of the model ...
+```
+
+The `Field` function from Pydantic accepts positional arguments first (like `default`) and keyword arguments second (like `ge`, `le`, `description`).
+
+**The most likely cause is that you have accidentally misplaced a keyword argument before a positional one on line 18, or possibly line 17 or 19 if the line numbering is slightly off.**
+
+**Example of the Error:**
+
+```python
+# Incorrect: Keyword 'ge' comes before positional 'description'
+my_field: Optional[float] = Field(default=None, ge=0.0, "My Description", le=2.0) # SYNTAX ERROR HERE
+
+# Correct: Positional 'default' and 'description' come before keywords 'ge' and 'le'
+my_field: Optional[float] = Field(default=None, description="My Description", ge=0.0, le=2.0)
+# OR using only keywords (safest)
+my_field: Optional[float] = Field(default=None, description="My Description", ge=0.0, le=2.0)
+```
+
+**Solution:**
+
+1.  **Open `app/api/models/llm.py`.**
+2.  **Go to line 18.** Look closely at the `Field(...)` call for the `temperature` field (and the lines immediately around it for `max_new_tokens` and `top_p`).
+3.  **Ensure all positional arguments** (like `default=...`) come **before** any keyword arguments (`ge=...`, `le=...`, `description=...`). If you added a `description` recently, make sure it's placed correctly. The safest way is often to use keywords for *all* arguments after the first `default` argument if it's used positionally.
+4.  **Correct the order** if you find a keyword argument preceding a positional one.
+5.  **Save the file.**
+6.  **Restart Uvicorn.**
+
+The import error should now be resolved, and the `models` router should be included successfully.
+
+here is the code - line 18 is in the ModelLoadRequest(BaseModel) class:
+
+# app/api/models/llm.py
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Literal
+from services.llm_service import LLMStatus # Import Enum
+
+class ModelLoadRequest(BaseModel):
+    # --- NEW: Optional backend type selection ---
+    backend_type: Optional[Literal["local", "ollama", "vllm", "instructlab"]] = Field(
+        default=None,
+        description="Specify the backend type to use. If None, uses the server's configured default."
+    )
+    # --- model_name_or_path is now optional ---
+    model_name_or_path: Optional[str] = Field(
+        default=None, # Default to None, will use server default if not provided
+        description="Identifier for the model (HF ID, path for 'local'; model name for API backends). If None, uses server's default model."
+    )
+    # Device/Quantization remain optional, only relevant for 'local'
+    device: Optional[str] = Field(default=None, ...)
+    quantization: Optional[str] = Field(default=None, ...)
+
+class BackendDetails(BaseModel):
+    # Example structure, might vary based on backend.get_status_dict() output
+    # For local:
+    active_model: Optional[str] = None
+    load_config: Optional[Dict[str, Any]] = None
+    max_model_length: Optional[int] = None
+    # For API:
+    backend_url: Optional[str] = None
+    # active_model is already top-level
+
+    class Config:
+        extra = 'allow' # Allow extra fields from backend status dicts
+
+
+class ModelStatusResponse(BaseModel):
+    backend_type: Optional[str] = None
+    active_model: Optional[str] = None # Model name active on the backend
+    status: str # Use the string value (e.g., "Ready", "Loading")
+    last_error: Optional[str] = None
+    generation_config: Optional[Dict[str, Any]] = None
+    backend_details: Optional[BackendDetails] = None # Specifics from backend
+
+class ModelUpdateRequest(BaseModel):
+    # This remains the same, updates the global config
+    max_new_tokens: Optional[int] = Field(default=None, ge=1)
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    top_k: Optional[int] = Field(default=None, ge=1)
+    repetition_penalty: Optional[float] = Field(default=None, ge=1.0)
+
+    def get_updates(self) -> Dict[str, Any]:
+        return self.dict(exclude_unset=True, exclude_none=True)
+
+
+class AvailableModelsResponse(BaseModel):
+    # Keep this as before
+    local_model_paths: List[str] = Field(description="Absolute paths to models found in the dedicated local_models directory.")
+    cached_hub_models: List[str] = Field(description="Model IDs found in the Hugging Face Hub cache directory.")
+
+You're right, line 18 according to this code is indeed within the `ModelLoadRequest` class, specifically this line:
+
+```python
+    device: Optional[str] = Field(default=None, ...) # Line 18
+```
+
+The error `SyntaxError: positional argument follows keyword argument` is triggered by the literal ellipsis (`...`) being used **after** the keyword argument `default=None`.
+
+The ellipsis (`...`) is sometimes used in type hints (e.g., `Callable[..., Any]`) or as a placeholder in stubs, but it's **not** a valid argument or placeholder value for Pydantic's `Field` function in this context. `Field` expects actual default values or keyword arguments for validation/metadata.
+
+**Solution:**
+
+Remove the `...` from lines 18 and 19. Since you already provide `default=None`, that's sufficient to indicate the field is optional and defaults to None if not provided.
+
+```python
+# app/api/models/llm.py
+# ... (imports) ...
+
+class ModelLoadRequest(BaseModel):
+    # ... (backend_type, model_name_or_path fields) ...
+
+    # Device/Quantization remain optional, only relevant for 'local'
+    # --- REMOVE the ellipsis (...) from these lines ---
+    device: Optional[str] = Field(default=None, description="Local Only: Device ('cuda', 'cpu'). Overrides server default if backend is 'local'.") # Corrected Line 18
+    quantization: Optional[str] = Field(default=None, description="Local Only: Quantization ('8bit', '4bit'). Overrides server default if backend is 'local'.") # Corrected Line 19
+
+# ... (rest of the file) ...
+```
+
+**Explanation:**
+
+*   We removed the trailing `...` from the `Field` calls for `device` and `quantization`.
+*   We added the relevant `description` keyword argument back in, ensuring it comes *after* the `default` argument.
+
+**After Applying the Fix:**
+
+1.  Save the corrected `app/api/models/llm.py`.
+2.  Restart Uvicorn.
+
+The `SyntaxError` during import should now be resolved, and the `models` router should load correctly.
+
+I need to add code to ENSURE THE HUGGINGFACE CLI LOGIN IS COMPLETED BEFORE EVERYThING ELSE STARTS:
+
+INFO:services.llm_service:[Local Loader] Starting task for 'llama3' on device 'cuda' q: 'None'...
+INFO:services.llm_service:[Local Loader] Loading tokenizer for 'llama3'...
+ERROR:services.llm_service:[Local Loader] Failed to load model 'llama3': OSError: llama3 is not a local folder and is not a valid model identifier listed on 'https://huggingface.co/models'
+If this is a private repository, make sure to pass a token having permission to this repo either by logging in with `huggingface-cli login` or by passing `token=<your_token>`
+Traceback (most recent call last):
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 409, in hf_raise_for_status
+    response.raise_for_status()
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/requests/models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 404 Client Error: Not Found for url: https://huggingface.co/llama3/resolve/main/tokenizer_config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/utils/hub.py", line 424, in cached_files
+    hf_hub_download(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 862, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 969, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1486, in _raise_on_head_call_error
+    raise head_call_error
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1376, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1296, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 280, in _request_wrapper
+    response = _request_wrapper(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 304, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 458, in hf_raise_for_status
+    raise _format(RepositoryNotFoundError, message, response) from e
+huggingface_hub.errors.RepositoryNotFoundError: 404 Client Error. (Request ID: Root=1-67eac108-6f564a546b53eb516e465296;817922e2-2712-4052-8672-809ad9dc0ed7)
+
+Repository Not Found for url: https://huggingface.co/llama3/resolve/main/tokenizer_config.json.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/services/llm_service.py", line 158, in _load_local_model_task
+    tokenizer = AutoTokenizer.from_pretrained(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 910, in from_pretrained
+    tokenizer_config = get_tokenizer_config(pretrained_model_name_or_path, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 742, in get_tokenizer_config
+    resolved_config_file = cached_file(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/utils/hub.py", line 266, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/utils/hub.py", line 456, in cached_files
+    raise EnvironmentError(
+OSError: llama3 is not a local folder and is not a valid model identifier listed on 'https://huggingface.co/models'
+If this is a private repository, make sure to pass a token having permission to this repo either by logging in with `huggingface-cli login` or by passing `token=<your_token>`
+
+Here's a thinking process for adding the Hugging Face login check:
+
+1.  **Understand the Problem:** The user encountered an `OSError` combined with `huggingface_hub.errors.RepositoryNotFoundError` when trying to load `llama3`. The error message clearly states that the model identifier isn't found on the Hub *or* suggests it might be a private/gated model requiring authentication. The user explicitly asked to ensure the Hugging Face CLI login is completed *before* the server starts doing anything else (like loading models).
+
+2.  **Identify the Goal:** We need a mechanism to check if the user is logged into Hugging Face Hub (meaning a token is available locally) *at server startup*. If not logged in, the server should ideally either:
+    *   Log a strong warning and potentially continue (but model loading for private/gated models will fail later).
+    *   Refuse to start, forcing the user to log in first. (This seems safer and more aligned with the user's request "ensure ... login is completed").
+
+3.  **Find the Right Tool:** How can we programmatically check the Hugging Face login status? The `huggingface_hub` library itself should provide this functionality.
+    *   Recall or search `huggingface_hub` documentation/API reference for authentication or token management. Keywords: "huggingface_hub check login", "huggingface_hub get token", "huggingface_hub whoami".
+    *   The `huggingface_hub.whoami()` function seems promising. It tries to retrieve user information using the stored token. If it succeeds, the user is logged in. If it fails (e.g., raises an exception or returns specific error info), they are not.
+    *   Alternatively, `huggingface_hub.get_token()` could be used. If it returns a token string, they are logged in. If it returns `None`, they are not. This seems simpler and less prone to network errors than `whoami()`.
+
+4.  **Choose the Check Location:** Where in the server startup process should this check happen?
+    *   It needs to run *early*, before any attempt to load models that might require authentication.
+    *   The FastAPI `startup` event handler in `app/main.py` is a good place. It runs after the initial application setup but before the server starts accepting requests, and crucially *before* we trigger any model loading (like the embedding model pre-load or any potential default LLM pre-load).
+    *   Putting it right at the beginning of the `startup_event` function seems appropriate.
+
+5.  **Implement the Check:**
+    *   Import `get_token` from `huggingface_hub`.
+    *   Import `sys` to allow exiting the application if login fails.
+    *   Inside `startup_event`:
+        *   Call `get_token()`.
+        *   Check if the result is `None`.
+        *   If `None`:
+            *   Print a clear error message instructing the user to run `huggingface-cli login`.
+            *   Use `sys.exit(1)` to terminate the server startup process with a non-zero exit code, indicating failure.
+        *   If not `None`:
+            *   Print a confirmation message that the user is logged in.
+            *   Continue with the rest of the startup process (DB connection, embedding model load, etc.).
+
+6.  **Refine the Code (Error Handling, Imports):**
+    *   Ensure necessary imports (`huggingface_hub`, `sys`, `logging` or `print`) are in `app/main.py`.
+    *   Wrap the check logic clearly.
+
+7.  **Consider Alternatives (and why the chosen method is good):**
+    *   *Trying to log in programmatically:* Generally discouraged for security reasons (handling user credentials). Using the CLI's stored token is standard practice.
+    *   *Passing token via config:* Possible (`token=<your_token>` argument in `from_pretrained`), but less secure and less convenient than `huggingface-cli login`. The check ensures the standard login method has been used.
+    *   *Just warning instead of exiting:* Less robust. The user requested *ensuring* login. Exiting prevents unexpected failures later when trying to load a gated model.
+
+8.  **Final Code Structure (in `app/main.py` `startup_event`):**
+    ```python
+    from huggingface_hub import get_token
+    import sys
+    # ... other imports ...
+
+    @app.on_event("startup")
+    async def startup_event():
+        print("--- Running Server Startup ---") # Add a clear marker
+
+        # --- Check Hugging Face Login ---
+        print("--> Checking Hugging Face token...")
+        hf_token = get_token()
+        if hf_token is None:
+            print("\n" + "="*50)
+            print("ERROR: Hugging Face token not found.")
+            print("Please log in using the Hugging Face CLI:")
+            print("  huggingface-cli login")
+            print("Exiting server startup.")
+            print("="*50 + "\n")
+            sys.exit(1) # Exit with error code
+        else:
+            print("--> Hugging Face token found. Login verified.")
+        # --- End Check ---
+
+        # --- Original Startup Steps ---
+        print("--> Connecting to database...")
+        await connect_db()
+        # ... rest of startup ...
+    ```
+
+9.  **Documentation/Explanation:** Explain *why* this check is necessary (private/gated models), how it works (`get_token`), where it's placed, and what the user needs to do (`huggingface-cli login`). Also, explicitly mention the `llama3` model requires authentication as it's gated.
+
+Okay, you've hit a very common scenario when dealing with Hugging Face models, especially popular ones like Llama 3.
+
+**Diagnosis:**
+
+1.  **`llama3` is not the HF Identifier:** The primary error `Repository Not Found for url: https://huggingface.co/llama3/resolve/main/tokenizer_config.json` means there isn't a model or repository directly named `llama3` under the root namespace on Hugging Face Hub. The official Llama 3 models are released under the `meta-llama` organization (e.g., `meta-llama/Meta-Llama-3-8B-Instruct`).
+2.  **Gated Model & Authentication:** Even if you used the correct identifier (`meta-llama/Meta-Llama-3-8B-Instruct`), Llama 3 models are *gated*. This means you need to:
+    *   Go to the model page on Hugging Face Hub (e.g., [https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)).
+    *   Agree to the license terms.
+    *   Be logged into your Hugging Face account *locally* using a token that has permission to access the model. The error message correctly points this out: `If this is a private or gated repo, make sure you are authenticated.`
+
+**Solution: Add Startup Login Check**
+
+You are right, we need to ensure the Hugging Face login (which stores a token locally) is done *before* the server potentially tries to load gated models. The best place is at the very beginning of the FastAPI startup event.
+
+**1. Modify `app/main.py`:**
+
+Add the check at the beginning of the `startup_event` function.
+
+```python
+# app/main.py
+import uvicorn
+from fastapi import FastAPI
+import datetime
+import sys # Import sys for exiting
+import os
+
+# --- ADD Hugging Face Hub import ---
+from huggingface_hub import get_token, login # Import get_token
+# --- END ADD ---
+
+# Adjust path if needed
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+print(f"Project root added to sys.path: {project_root}")
+
+# Import routers
+# ... (document, sessions, models, system imports - keep diagnostic prints if desired) ...
+print("-" * 20)
+print("Attempting to import 'documents' endpoint module...")
+try:
+    from app.api.endpoints import documents
+    print("SUCCESS: Imported 'documents' module.")
+    print(f"  -> Type: {type(documents)}")
+    print(f"  -> Has 'router' attribute: {hasattr(documents, 'router')}")
+except ImportError as e:
+    print(f"FAILED to import 'documents': {e}")
+    documents = None # Ensure variable exists but is None
+except Exception as e:
+    print(f"FAILED to import 'documents' with unexpected error: {e}")
+    documents = None
+
+print("-" * 20)
+print("Attempting to import 'sessions' endpoint module...")
+try:
+    from app.api.endpoints import sessions
+    print("SUCCESS: Imported 'sessions' module.") # <<< **** WATCH FOR THIS ****
+    print(f"  -> Type: {type(sessions)}")
+    print(f"  -> Has 'router' attribute: {hasattr(sessions, 'router')}") # <<< **** AND THIS ****
+except ImportError as e:
+    print(f"FAILED to import 'sessions': {e}") # <<< **** OR THIS ****
+    sessions = None
+except Exception as e:
+    print(f"FAILED to import 'sessions' with unexpected error: {e}")
+    sessions = None
+
+print("-" * 20)
+print("Attempting to import 'models' endpoint module...")
+try:
+    from app.api.endpoints import models
+    print("SUCCESS: Imported 'models' module.") # <<< **** WATCH FOR THIS ****
+    print(f"  -> Type: {type(models)}")
+    print(f"  -> Has 'router' attribute: {hasattr(models, 'router')}") # <<< **** AND THIS ****
+except ImportError as e:
+    print(f"FAILED to import 'models': {e}") # <<< **** OR THIS ****
+    models = None
+except Exception as e:
+    print(f"FAILED to import 'models' with unexpected error: {e}")
+    models = None
+
+print("-" * 20)
+print("Attempting to import 'system' endpoint module...")
+try:
+    from app.api.endpoints import system
+    print("SUCCESS: Imported 'system' module.") # <<< **** WATCH FOR THIS ****
+    print(f"  -> Type: {type(system)}")
+    print(f"  -> Has 'router' attribute: {hasattr(system, 'router')}") # <<< **** AND THIS ****
+except ImportError as e:
+    print(f"FAILED to import 'system': {e}") # <<< **** OR THIS ****
+    system = None
+except Exception as e:
+    print(f"FAILED to import 'system' with unexpected error: {e}")
+    system = None
+
+print("-" * 20)
+
+# Continue with other imports
+from core.config import settings
+from db.database import connect_db, disconnect_db # Keep create/get calls out of imports if possible
+from services.embedding_service import get_embedding_model # For pre-loading
+from services.system_service import shutdown_nvml # For shutdown
+from services.llm_service import _unload_current_backend # For shutdown
+
+# --- Core Application Setup ---
+# (Run DB/Chroma setup *before* FastAPI app instance if they are needed immediately)
+# This ensures tables/collections exist before startup event tries to connect/use them.
+try:
+    print("--- Initializing database schema and collections ---")
+    # Import creation functions here to run them early
+    from db.database import create_metadata_tables, get_or_create_collections
+    create_metadata_tables()
+    get_or_create_collections()
+    print("--- Database schema and collections initialization complete ---")
+except Exception as e:
+    print(f"FATAL: Failed to initialize database/ChromaDB structures: {e}", file=sys.stderr)
+    sys.exit(1)
+
+
+print("Creating FastAPI app instance...")
+app = FastAPI(
+    title=settings.APP_NAME,
+    description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
+    version="0.1.0",
+)
+print("FastAPI app instance created.")
+
+
+# --- Event Handlers ---
+@app.on_event("startup")
+async def startup_event():
+    print("--- Running Server Startup ---")
+
+    # --- Check Hugging Face Login ---
+    print("--> Checking Hugging Face token...")
+    try:
+        hf_token = get_token()
+        if hf_token is None:
+            print("\n" + "="*60)
+            print("ERROR: Hugging Face token not found.")
+            print("Please log in using the Hugging Face CLI before starting the server:")
+            print("  huggingface-cli login")
+            print("You may need read/write access depending on the models.")
+            print("Server startup aborted.")
+            print("="*60 + "\n")
+            sys.exit(1) # Exit with error code
+        else:
+            # Optionally, you could add a whoami() call here to verify the token is valid
+            # try:
+            #     from huggingface_hub import whoami
+            #     user_info = whoami()
+            #     print(f"--> Hugging Face token found and verified for user: {user_info.get('name')}")
+            # except Exception as auth_err:
+            #     print(f"\n{'='*60}")
+            #     print(f"ERROR: Found Hugging Face token but failed to verify: {auth_err}")
+            #     print("The token might be invalid or expired. Try logging in again:")
+            #     print("  huggingface-cli login")
+            #     print(f"{'='*60}\n")
+            #     sys.exit(1)
+            print("--> Hugging Face token found. Login appears successful.")
+
+    except ImportError:
+         print("\n" + "="*60)
+         print("WARNING: `huggingface_hub` library not found.")
+         print("Cannot check login status. Loading gated models will likely fail.")
+         print("Please install it: pip install huggingface_hub")
+         print("="*60 + "\n")
+         # Decide whether to exit or just warn
+         # sys.exit(1) # Exit if login is strictly required
+    except Exception as e:
+         print(f"\n{'='*60}")
+         print(f"ERROR: An unexpected error occurred checking Hugging Face token: {e}")
+         print("Server startup aborted.")
+         print(f"{'='*60}\n")
+         sys.exit(1)
+    # --- End Check ---
+
+
+    # --- Original Startup Steps ---
+    print("--> Connecting to database...")
+    await connect_db()
+
+    print("--> Pre-loading embedding model...")
+    try:
+        get_embedding_model() # Trigger embedding model load
+        print("--> Embedding model loading initiated (check logs for completion).")
+    except Exception as e:
+        print(f"--> ERROR: Failed to pre-load embedding model during startup: {e}")
+
+    print("--> Event: startup complete.")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Disconnect DB, shutdown NVML, unload LLM backend."""
+    # ... (shutdown logic remains the same) ...
+    print("--> Event: shutdown")
+    await disconnect_db()
+    print("--> Shutting down NVML...")
+    try:
+         shutdown_nvml()
+    except Exception as e:
+         print(f"--> WARNING: Error during NVML shutdown: {e}")
+    print("--> Unloading active LLM backend...")
+    try:
+        await _unload_current_backend()
+        print("--> LLM backend unloaded.")
+    except Exception as e:
+        print(f"--> WARNING: Error during LLM backend unload: {e}")
+    print("--> Event: shutdown complete.")
+
+
+# --- Basic Root Endpoint ---
+# ... (root endpoint) ...
+
+# --- Include API Routers ---
+# ... (include documents, sessions, models, system routers - use the diagnostic versions if helpful) ...
+print("-" * 20)
+if documents and hasattr(documents, 'router'):
+    print("Including 'documents' router...")
+    app.include_router(
+        documents.router,
+        prefix="/api/v1/documents",
+        tags=["Documents"]
+    )
+    print("SUCCESS: Included 'documents' router.")
+else:
+    print("SKIPPING 'documents' router inclusion (module or router attribute not found).")
+
+print("-" * 20)
+if sessions and hasattr(sessions, 'router'): # Check module and attribute exist
+    print("Including 'sessions' router...") # <<< **** WATCH FOR THIS ****
+    app.include_router(
+        sessions.router,
+        prefix="/api/v1/sessions",
+        tags=["Chat Sessions"]
+    )
+    print("SUCCESS: Included 'sessions' router.")
+else:
+    print("SKIPPING 'sessions' router inclusion (module or router attribute not found).") # <<< **** OR THIS ****
+
+print("-" * 20)
+if models and hasattr(models, 'router'): # Check module and attribute exist
+    print("Including 'models' router...") # <<< **** WATCH FOR THIS ****
+    app.include_router(
+        models.router,
+        prefix="/api/v1/models",
+        tags=["LLM Management"]
+    )
+    print("SUCCESS: Included 'models' router.")
+else:
+    print("SKIPPING 'models' router inclusion (module or router attribute not found).") # <<< **** OR THIS ****
+
+print("-" * 20)
+if system and hasattr(system, 'router'): # Check module and attribute exist
+    print("Including 'system' router...") # <<< **** WATCH FOR THIS ****
+    app.include_router(
+        system.router,
+        prefix="/api/v1/system",
+        tags=["System Status"]
+    )
+    print("SUCCESS: Included 'system' router.")
+else:
+    print("SKIPPING 'system' router inclusion (module or router attribute not found).") # <<< **** OR THIS ****
+print("-" * 20)
+
+
+# --- Running the Server ---
+if __name__ == "__main__":
+    # ... (uvicorn.run call remains the same) ...
+    print("Starting server via __main__ block...")
+    uvicorn.run(
+        "app.main:app",
+        host=settings.SERVER_HOST,
+        port=settings.SERVER_PORT,
+        reload=True, # Reload might interfere slightly with sys.exit, but okay for dev
+        reload_dirs=[
+            str(settings.BASE_DIR / 'app'),
+            str(settings.BASE_DIR / 'core'),
+            str(settings.BASE_DIR / 'db'),
+            str(settings.BASE_DIR / 'services')
+        ]
+    )
+
+print("--- End of main.py ---") # Should not be reached when run with uvicorn normally
+```
+
+**Explanation:**
+
+1.  **Import `get_token` and `sys`:** Added necessary imports.
+2.  **Check in `startup_event`:** Placed the check right at the beginning of the startup function.
+3.  **Call `get_token()`:** Retrieves the locally stored token (if any).
+4.  **Check if `None`:** If `get_token()` returns `None`, it means the user isn't logged in via `huggingface-cli login`.
+5.  **Error Message & Exit:** If `None`, print a clear error explaining the problem and how to fix it (`huggingface-cli login`). Crucially, `sys.exit(1)` is called to terminate the server startup.
+6.  **Success Message:** If a token is found, print a confirmation. (Added optional `whoami` check for robustness).
+7.  **Error Handling:** Added `try...except` around the check to catch potential `ImportError` (if `huggingface_hub` isn't installed) or other unexpected issues.
+
+**How to Use:**
+
+1.  **Log Out (Optional for Testing):** If you are currently logged in, you can log out using `huggingface-cli logout`.
+2.  **Run the Server:** Start the server `uvicorn app.main:app ...`.
+3.  **Observe Startup:**
+    *   If you are **logged out**, the server should print the error message about needing to log in and then exit. It won't proceed to connect to the database or load models.
+    *   If you are **logged in**, the server should print "Hugging Face token found..." and continue the startup process as normal.
+4.  **Log In:** If prompted, run `huggingface-cli login` in your terminal and follow the instructions (usually involves pasting a token from the Hugging Face website).
+5.  **Restart Server:** Start the server again. It should now pass the check.
+6.  **Load Llama 3 (Correctly):** Use the *correct* model identifier and ensure you've accepted the license terms on the Hugging Face website for that model. Example request to load the 8B instruct model using the `local` backend:
+    ```json
+    {
+      "model_name_or_path": "meta-llama/Meta-Llama-3-8B-Instruct"
+    }
+    ```
+
+This check ensures that the necessary authentication prerequisite is met before the server fully starts, preventing confusing errors later when trying to access gated models.
+
+"where does this import come from? from huggingface_hub import get_token, login"
+
+1.  **Identify the core question:** The user is asking about the origin of the `huggingface_hub` import, specifically `get_token` and `login`.
+2.  **Recall project setup:** Remember the `requirements.txt` file generated earlier. Does it include `huggingface_hub`? (No, it doesn't explicitly, but `transformers` depends on it).
+3.  **Identify the relevant library:** The name `huggingface_hub` clearly points to the Hugging Face Hub library itself.
+4.  **Explain the library's purpose:** Briefly describe what `huggingface_hub` is used for (interacting with the Hub: downloading files, managing cache, authentication, etc.).
+5.  **Explain installation:**
+    *   State that it's the library providing these functions.
+    *   Explain that it's usually installed as a *dependency* of `transformers`.
+    *   Provide the explicit `pip install huggingface_hub` command in case it needs to be installed separately or updated.
+6.  **Explain the specific functions:**
+    *   `get_token`: What does it do? (Retrieves the locally cached login token).
+    *   `login`: What does it do? (Used *by the user* via `huggingface-cli login`, or programmatically, to store the token). Clarify the startup check uses `get_token`, not `login`.
+7.  **Reinforce the context:** Remind the user why this import was added (to check for the presence of the token during server startup).
+
+You are right to ask for clarification!
+
+The import `from huggingface_hub import get_token, login` comes from the **`huggingface_hub`** Python library.
+
+**What is `huggingface_hub`?**
+
+*   It's the official client library provided by Hugging Face for interacting with the Hugging Face Hub (their platform for models, datasets, etc.).
+*   It handles tasks like:
+    *   Downloading models, datasets, and files.
+    *   Managing the local cache (`~/.cache/huggingface/hub`).
+    *   **Authentication:** Handling user login tokens needed to access private or gated repositories (like Llama 3).
+    *   Uploading files.
+    *   Searching the Hub.
+
+**Installation:**
+
+This library is usually installed automatically as a **dependency** when you install `transformers`:
+
+```bash
+pip install transformers
+```
+
+However, if for some reason it's missing or you need to ensure you have it, you can install it explicitly:
+
+```bash
+pip install huggingface_hub
+```
+
+**Functions Used:**
+
+*   **`get_token()`:** This function specifically reads the token that has been previously saved locally (usually in `~/.cache/huggingface/token` or a similar location) by the user running `huggingface-cli login`. Our startup check uses this to see *if* a token exists.
+*   **`login()`:** This function (or its CLI counterpart `huggingface-cli login`) is what the *user* runs to authenticate themselves and store the token locally. Our server code *doesn't* call `login()`; it only calls `get_token()` to check if the user has already logged in via the CLI.
+
+So, by adding `from huggingface_hub import get_token`, we are importing the necessary function from the official Hugging Face client library to perform the authentication check during server startup.
+
+"can we change the code to pull the token from the .env file?"
+
+Okay, yes, we can definitely modify the server to read the Hugging Face token from the `.env` file instead of solely relying on the `huggingface-cli login` cache. This is a common and often preferred method for server deployments or CI/CD environments.
+
+The `huggingface_hub` and `transformers` libraries are actually designed to **automatically look for the token in the `HUGGING_FACE_HUB_TOKEN` environment variable** if they can't find one in the default cache location (`~/.cache/huggingface/token`) or if one isn't passed explicitly.
+
+So, the main steps are:
+
+1.  Add `HUGGING_FACE_HUB_TOKEN` as an optional setting in `core/config.py` so `pydantic-settings` loads it from `.env`.
+2.  Modify the startup check in `app/main.py` to verify that *either* `get_token()` finds a file token *or* the `HUGGING_FACE_HUB_TOKEN` environment variable is set.
+3.  Update `.gitignore` and provide instructions for the `.env` file.
+
+**Step 1: Modify `core/config.py`**
+
+Add the `HUGGING_FACE_HUB_TOKEN` field to your `Settings` class.
+
+```python
+# core/config.py
+import os
+import torch
+from pydantic_settings import BaseSettings
+from pydantic import Field
+from pathlib import Path
+import tempfile
+from typing import Optional, List, Any, Literal
+
+# ... (get_default_device function) ...
+
+class Settings(BaseSettings):
+    # ... (General, DB, Embedding settings) ...
+
+    # --- LLM Settings ---
+    LLM_BACKEND_TYPE: Literal["local", "ollama", "vllm", "instructlab"] = Field(default="local", ...)
+    OLLAMA_BASE_URL: Optional[str] = Field(default="http://localhost:11434", ...)
+    VLLM_BASE_URL: Optional[str] = Field(default=None, ...)
+    INSTRUCTLAB_BASE_URL: Optional[str] = Field(default=None, ...)
+    DEFAULT_MODEL_NAME_OR_PATH: str = Field(default="gpt2", ...)
+
+    # --- NEW: Optional HF Token from Environment ---
+    HUGGING_FACE_HUB_TOKEN: Optional[str] = Field(
+        default=None,
+        description="Optional Hugging Face Hub token. If set, overrides login via CLI. Loaded from .env or environment variable."
+    )
+    # ---------------------------------------------
+
+    LOCAL_MODELS_DIR: Path = BASE_DIR / "local_models"
+    LLM_DEVICE: str = Field(default_factory=get_default_device)
+    DEFAULT_LLM_QUANTIZATION: Optional[str] = Field(default=None)
+
+    DEFAULT_LLM_MAX_NEW_TOKENS: int = Field(default=512)
+    DEFAULT_LLM_TEMPERATURE: float = Field(default=0.7)
+    DEFAULT_LLM_TOP_P: float = Field(default=0.9)
+    DEFAULT_LLM_TOP_K: int = Field(default=50)
+
+    # ... (Other settings) ...
+
+    class Config:
+        env_file = '.env'
+        env_file_encoding = 'utf-8'
+        extra = 'ignore'
+
+settings = Settings()
+
+# ... (Ensure directories exist) ...
+# ... (Print config) ...
+# Optionally print if token is found via environment
+# Be careful NOT to print the token itself!
+# print(f"Hugging Face Token via Env: {'Set' if settings.HUGGING_FACE_HUB_TOKEN else 'Not Set'}")
+print(f"--------------------------")
+```
+
+**Step 2: Modify Startup Check in `app/main.py`**
+
+Update the `startup_event` to check both `get_token()` and the environment variable (accessed via `settings`).
+
+```python
+# app/main.py
+import uvicorn
+from fastapi import FastAPI
+import datetime
+import sys
+import os
+
+# Import get_token (still useful for checking file)
+from huggingface_hub import get_token
+
+# ... (other imports: routers, config, db, services) ...
+from core.config import settings # Import settings object
+
+# ... (path setup, router imports, diagnostic prints) ...
+# ... (Database/Chroma initialization) ...
+# ... (FastAPI app = FastAPI(...) definition) ...
+
+# --- Event Handlers ---
+@app.on_event("startup")
+async def startup_event():
+    print("--- Running Server Startup ---")
+
+    # --- Check Hugging Face Login / Token ---
+    print("--> Checking Hugging Face token...")
+    auth_ok = False
+    source = "Not found"
+    try:
+        # Check 1: Environment Variable / .env file via settings
+        env_token = settings.HUGGING_FACE_HUB_TOKEN
+        if env_token:
+            print("--> Found Hugging Face token via environment variable/'.env'.")
+            # Optional: Add verification using the env token if needed
+            # from huggingface_hub import HfApi
+            # try:
+            #     api = HfApi(token=env_token)
+            #     user_info = api.whoami()
+            #     print(f"--> Token verified for user: {user_info.get('name')}")
+            #     auth_ok = True
+            #     source = "Environment Variable"
+            # except Exception as auth_err:
+            #      print(f"--> WARNING: Token found via env var but failed verification: {auth_err}")
+            #      # Decide if verification failure is critical
+            # Let's assume token presence is enough for now
+            auth_ok = True
+            source = "Environment Variable / .env"
+
+        # Check 2: Cached Token File (only if env var not found)
+        if not auth_ok:
+            print("--> No token found via environment, checking cached login file...")
+            file_token = get_token() # Checks ~/.cache/huggingface/token
+            if file_token:
+                print("--> Found Hugging Face token via cached login file ('huggingface-cli login').")
+                # Verification can be done implicitly when libraries use it
+                auth_ok = True
+                source = "Cached Login File"
+
+        # If neither method found a token
+        if not auth_ok:
+            print("\n" + "="*60)
+            print("ERROR: Hugging Face token not found.")
+            print("Please provide a token using one of these methods:")
+            print("  1. Log in using the Hugging Face CLI: `huggingface-cli login`")
+            print("  2. Set the HUGGING_FACE_HUB_TOKEN in your environment variables or .env file.")
+            print("You may need read/write access depending on the models.")
+            print("Server startup aborted.")
+            print("="*60 + "\n")
+            sys.exit(1) # Exit with error code
+        else:
+             print(f"--> Hugging Face token found successfully (Source: {source}).")
+
+    except ImportError:
+         print("\n" + "="*60)
+         print("WARNING: `huggingface_hub` library not found.")
+         print("Cannot check token status. Loading gated models will likely fail.")
+         print("Please install it: pip install huggingface_hub")
+         print("="*60 + "\n")
+         # sys.exit(1) # Optionally exit
+    except Exception as e:
+         print(f"\n{'='*60}")
+         print(f"ERROR: An unexpected error occurred checking Hugging Face token: {e}")
+         print("Server startup aborted.")
+         print(f"{'='*60}\n")
+         sys.exit(1)
+    # --- End Check ---
+
+    # --- Original Startup Steps ---
+    # ... (connect_db, load embedding model) ...
+    print("--> Event: startup complete.")
+
+# ... (@app.on_event("shutdown") remains the same) ...
+# ... (Root endpoint remains the same) ...
+# ... (Include routers remains the same) ...
+# ... (if __name__ == "__main__": remains the same) ...
+```
+
+**Explanation of Changes in `startup_event`:**
+
+1.  Imports `settings`.
+2.  First checks `settings.HUGGING_FACE_HUB_TOKEN` (which would have loaded the value from the environment variable or `.env`).
+3.  If the environment token is found, `auth_ok` is set to `True`. (Optional verification commented out for simplicity).
+4.  If *no* environment token is found, *then* it checks the cached file using `get_token()`.
+5.  If either method succeeds, it prints a success message indicating the source.
+6.  If *neither* method finds a token, it prints the error explaining *both* methods (CLI login or `.env`/environment variable) and exits.
+
+**Step 3: Update `.gitignore` and `.env` Example**
+
+*   **`.gitignore`:** Ensure `.env` is listed. Add a comment if desired.
+    ```gitignore
+    # ... other ignores ...
+    .env # Ignore environment variables file (contains secrets!)
+    # ...
+    ```
+*   **`.env` Example:** Add the `HUGGING_FACE_HUB_TOKEN` variable (commented out by default).
+    ```.env
+    # Server Configuration
+    LLM_BACKEND_TYPE=local # Or ollama, vllm, etc.
+    DEFAULT_MODEL_NAME_OR_PATH=gpt2 # Or meta-llama/Meta-Llama-3-8B-Instruct, etc.
+
+    # API Backend URLs (Uncomment and set if using these backend types)
+    # OLLAMA_BASE_URL=http://localhost:11434
+    # VLLM_BASE_URL=http://localhost:8000
+    # INSTRUCTLAB_BASE_URL=http://localhost:XXXX
+
+    # Optional: Hugging Face Hub Token
+    # Provide this if you need to access private/gated models and are NOT using 'huggingface-cli login'.
+    # Get your token from https://huggingface.co/settings/tokens
+    # HUGGING_FACE_HUB_TOKEN="hf_YourAccessTokenHere"
+
+    # Other settings (Database paths, Embedding model, etc. usually derived in config.py)
+    # SERVER_PORT=8001 # Example override
+    ```
+
+**How it Works Now:**
+
+*   If you define `HUGGING_FACE_HUB_TOKEN` in your `.env` file or as an environment variable, `settings.HUGGING_FACE_HUB_TOKEN` will have that value. The startup check will find it and proceed. The `transformers`/`huggingface_hub` libraries will automatically pick up this environment variable for authentication when downloading models.
+*   If `HUGGING_FACE_HUB_TOKEN` is *not* set in the environment/`.env`, the startup check will then look for the token file created by `huggingface-cli login`. If found, it proceeds. The libraries will use the file token.
+*   If neither is found, the server startup fails with instructions.
+
+This provides a flexible way to manage the token for both local development (`huggingface-cli login`) and server deployments (`.env`/environment variable).
+
+INFO:services.llm_backends:OllamaBackend initialized: URL='http://localhost:11434', Model='meta-llama/Llama-3.2-3B-Instruct'
+INFO:services.llm_service:Backend 'ollama' configured and ready with model 'meta-llama/Llama-3.2-3B-Instruct'.
+INFO:     127.0.0.1:53094 - "POST /api/v1/models/load HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:52272 - "GET /api/v1/documents/?skip=0&limit=100 HTTP/1.1" 200 OK
+INFO:app.api.endpoints.sessions:Created new session with ID: f0307f6c-5787-47db-8401-84eba4400f5a, Name: earthmen
+INFO:     127.0.0.1:60356 - "POST /api/v1/sessions/ HTTP/1.1" 201 Created
+INFO:app.api.endpoints.sessions:[Session:f0307f6c-5787-47db-8401-84eba4400f5a] Stored user message (ID: 30).
+INFO:app.api.endpoints.sessions:[Session:f0307f6c-5787-47db-8401-84eba4400f5a] Performing RAG search within documents: ['61eccba3-49c5-418c-b5a3-e92166f763ce']
+INFO:services.embedding_service:Generating embeddings for 1 text chunks...
+INFO:services.embedding_service:Generated and converted 1 embeddings in 0.13 seconds.
+INFO:app.api.endpoints.sessions:[Session:f0307f6c-5787-47db-8401-84eba4400f5a] Retrieved 3 chunks for RAG context.
+INFO:app.api.endpoints.sessions:[Session:f0307f6c-5787-47db-8401-84eba4400f5a] Retrieved last 1 messages for history.
+INFO:app.api.endpoints.sessions:Constructing prompt for LLM...
+WARNING:app.api.endpoints.sessions:Tokenizer or max_length not found in llm_state, prompt truncation might be inaccurate if needed.
+ERROR:app.api.endpoints.sessions:[Session:f0307f6c-5787-47db-8401-84eba4400f5a] LLM generation failed: KeyError: 'model_name_or_path'
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 449, in add_message_to_session
+    logger.info(f"[Session:{session_id}] Sending prompt to LLM '{llm_status_data['model_name_or_path']}'...")
+KeyError: 'model_name_or_path'
+INFO:app.api.endpoints.sessions:[Session:f0307f6c-5787-47db-8401-84eba4400f5a] Stored assistant message (ID: 31).
+INFO:     127.0.0.1:45326 - "POST /api/v1/sessions/f0307f6c-5787-47db-8401-84eba4400f5a/messages HTTP/1.1" 201 Created
+
+Okay, another error related to accessing the state, this time when trying to log the model name just before the generation call.
+
+**Diagnosis:**
+
+1.  **Backend Ready:** Ollama backend is correctly configured and ready (`Backend 'ollama' configured and ready...`).
+2.  **RAG/History OK:** RAG and history retrieval seem fine.
+3.  **Truncation Warning:** `WARNING:app.api.endpoints.sessions:Tokenizer or max_length not found in llm_state...` This warning is expected and acceptable when using an API backend like Ollama, as truncation is often handled server-side by Ollama itself, and our server doesn't *need* the tokenizer/max_length from the `llm_state` in this case.
+4.  **Error Location:** The crash happens right before the LLM call:
+    ```
+    File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 449, in add_message_to_session
+        logger.info(f"[Session:{session_id}] Sending prompt to LLM '{llm_status_data['model_name_or_path']}'...")
+    KeyError: 'model_name_or_path'
+    ```
+5.  **Root Cause:** The `get_llm_status()` function in `services/llm_service.py` returns a dictionary representing the current status. We are trying to access `llm_status_data['model_name_or_path']`, but looking back at the `get_llm_status` implementation, it returns the model name under the key `active_model`, not `model_name_or_path`.
+
+**Solution:**
+
+Correct the key used to access the model name in the logging statement within `add_message_to_session` in `app/api/endpoints/sessions.py`.
+
+```python
+# app/api/endpoints/sessions.py
+# ... (imports) ...
+
+@router.post(
+    "/{session_id}/messages",
+    # ... (decorator) ...
+)
+async def add_message_to_session(
+    session_id: str,
+    message_data: MessageCreateRequest,
+):
+    # ... (message validation, get session, store user message) ...
+    # ... (RAG search logic) ...
+    # ... (Summarization logic) ...
+    # ... (Retrieve Chat History) ...
+
+    # --- Construct & Truncate Prompt ---
+    logger.info("Constructing final prompt using summarized context...")
+    llm_status_data = get_llm_status() # Gets the status dict
+    tokenizer = llm_state.get("tokenizer")
+    max_length = llm_state.get("max_model_length")
+    # --- Use 'active_model' key from status dict ---
+    model_name = llm_status_data.get("active_model", "N/A") # Use 'active_model' key
+
+    if llm_status_data["status"] != LLMStatus.READY.value:
+        # ... (error handling if not ready) ...
+        llm_ready = False
+    elif not tokenizer or not max_length:
+         logger.warning("Tokenizer or max_length not found in llm_state, prompt truncation might be inaccurate if needed.")
+         llm_ready = True
+    else:
+        llm_ready = True
+        # ... (prompt construction logic) ...
+
+    # --- Call LLM Service (Checks llm_ready flag) ---
+    if llm_ready:
+        try:
+            # --- CORRECT THE LOGGING LINE BELOW ---
+            # Use the 'model_name' variable which holds the value from 'active_model' key
+            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}' via backend '{llm_status_data['backend_type']}'...")
+            # --- END CORRECTION ---
+
+            loop = asyncio.get_running_loop()
+            llm_response = await loop.run_in_executor(
+                None, generate_text, prompt_for_llm
+            )
+            # ... (handle llm_response) ...
+
+        except Exception as e:
+            # ... (handle generation exception) ...
+
+    # ... (rest of the function: Store Assistant Message) ...
+
+# ... (list_messages_in_session) ...
+```
+
+**Key Change:**
+
+*   In the `try` block where the LLM call is made, the logging line was changed from `llm_status_data['model_name_or_path']` to simply use the `model_name` variable, which was already correctly assigned using `llm_status_data.get("active_model", "N/A")` earlier in the function.
+
+**After Applying the Fix:**
+
+1.  Save the updated `app/api/endpoints/sessions.py`.
+2.  Restart Uvicorn.
+3.  Configure for Ollama, load the Ollama model (e.g., `llama3`), create a session, send a message.
+
+The `KeyError` should be resolved, and the request should proceed correctly to call the Ollama backend via the `generate_text` service function.
+
+--> Event: startup complete.
+INFO:     Application startup complete.
+INFO:app.api.endpoints.models:Request received to activate model 'meta-llama/Llama-3.2-3B-Instruct' on effective backend 'ollama'.
+INFO:services.llm_service:Request to set active backend: type='ollama', model='meta-llama/Llama-3.2-3B-Instruct'
+INFO:services.llm_backends:OllamaBackend initialized: URL='http://localhost:11434', Model='meta-llama/Llama-3.2-3B-Instruct'
+INFO:services.llm_service:Backend 'ollama' configured and ready with model 'meta-llama/Llama-3.2-3B-Instruct'.
+INFO:     127.0.0.1:47816 - "POST /api/v1/models/load HTTP/1.1" 202 Accepted
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Stored user message (ID: 36).
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Performing RAG search within documents: ['61eccba3-49c5-418c-b5a3-e92166f763ce']
+INFO:services.embedding_service:Generating embeddings for 1 text chunks...
+INFO:services.embedding_service:Generated and converted 1 embeddings in 0.13 seconds.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Retrieved 3 chunks for RAG context.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Retrieved last 5 messages for history.
+WARNING:app.api.endpoints.sessions:Tokenizer or max_length not found in llm_state, prompt truncation might be inaccurate if needed.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Sending prompt to LLM 'meta-llama/Llama-3.2-3B-Instruct'...
+ERROR:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] LLM generation failed: TypeError: coroutines cannot be used with run_in_executor()
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 448, in add_message_to_session
+    llm_response = await loop.run_in_executor(
+  File "uvloop/loop.pyx", line 2735, in uvloop.loop.Loop.run_in_executor
+TypeError: coroutines cannot be used with run_in_executor()
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Stored assistant message (ID: 37).
+INFO:     127.0.0.1:38210 - "POST /api/v1/sessions/9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7/messages HTTP/1.1" 201 Created
+
+Okay, this `TypeError: coroutines cannot be used with run_in_executor()` is happening because we restructured `llm_service.generate_text` to handle different backends, and now it's an `async` function itself when dealing with API backends (like Ollama), but we are still trying to run it inside `run_in_executor` in `sessions.py`.
+
+**Diagnosis:**
+
+1.  **Backend Ready:** Ollama backend is ready with the Llama 3 model.
+2.  **RAG/History OK:** Steps completed.
+3.  **Prompt OK:** Prompt construction finishes.
+4.  **Error Location:** The error occurs when calling the LLM service:
+    ```
+    File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 448, in add_message_to_session
+        llm_response = await loop.run_in_executor(
+    File "uvloop/loop.pyx", line 2735, in uvloop.loop.Loop.run_in_executor
+    TypeError: coroutines cannot be used with run_in_executor()
+    ```
+5.  **Root Cause:**
+    *   We designed `llm_service.generate_text` to be smart: if the backend is `local`, it knows the call is blocking and expects the *caller* (`sessions.py`) to put it in an executor. If the backend is an API (`OllamaBackend`, `VLLMBackend`), `llm_service.generate_text` *itself* uses `await` to call the backend's async `generate` method (which uses `httpx`).
+    *   Therefore, `llm_service.generate_text` is now an `async def` function.
+    *   `asyncio.run_in_executor` is designed to run *synchronous*, blocking functions in a separate thread. You cannot pass an awaitable coroutine (like the one returned by calling `generate_text`) directly to `run_in_executor`.
+    *   The logic inside `llm_service.generate_text` *already* correctly handles running the blocking local pipeline in an executor if needed.
+
+**Solution:**
+
+Modify `add_message_to_session` in `app/api/endpoints/sessions.py` to **directly `await` the call to `llm_service.generate_text`**, removing the unnecessary `run_in_executor` wrapper.
+
+```python
+# app/api/endpoints/sessions.py
+# ... (imports) ...
+
+@router.post(
+    "/{session_id}/messages",
+    # ... (decorator) ...
+)
+async def add_message_to_session(
+    session_id: str,
+    message_data: MessageCreateRequest,
+):
+    # ... (message validation, get session, store user message) ...
+    # ... (RAG search logic) ...
+    # ... (Summarization logic) ...
+    # ... (Retrieve Chat History) ...
+    # ... (Construct & Truncate Prompt, set llm_ready flag) ...
+
+    # --- Call LLM Service (Checks llm_ready flag) ---
+    if llm_ready:
+        try:
+            logger.info(f"[Session:{session_id}] Sending prompt to LLM '{model_name}' via backend '{llm_status_data['backend_type']}'...")
+
+            # --- CORRECTED: Directly await the async service function ---
+            llm_response = await generate_text(prompt_for_llm)
+            # --- END CORRECTION ---
+
+            if llm_response is None:
+                raise Exception("LLM generation failed or returned None.")
+
+            assistant_response_content = llm_response
+            logger.info(f"[Session:{session_id}] Received response from LLM.")
+            logger.debug(f"[Session:{session_id}] LLM Response:\n{assistant_response_content[:500]}...")
+
+        except Exception as e:
+            error_detail = f"LLM generation failed: {type(e).__name__}"
+            logger.error(f"[Session:{session_id}] {error_detail}: {e}", exc_info=True)
+            if assistant_response_content is None:
+                 assistant_response_content = f"[ERROR: {error_detail}]"
+            assistant_message_metadata["llm_call_error"] = f"{error_detail}: {e}"
+    # ... (rest of the function: Store Assistant Message) ...
+
+# ... (list_messages_in_session) ...
+
+```
+
+**Explanation:**
+
+*   We simply replaced `await loop.run_in_executor(None, generate_text, prompt_for_llm)` with `await generate_text(prompt_for_llm)`.
+*   The `llm_service.generate_text` function itself now handles the distinction: if the backend is `local`, *it* uses `run_in_executor` internally; if the backend is API-based, *it* uses `await` internally. The caller (`add_message_to_session`) just needs to `await` the service function.
+
+**After Applying the Fix:**
+
+1.  Save the updated `app/api/endpoints/sessions.py`.
+2.  Restart Uvicorn.
+3.  Configure for Ollama, load the model, create a session, send a message.
+
+The `TypeError` should be gone, and the call should correctly `await` the `generate_text` coroutine, which will then appropriately handle calling the Ollama backend.
+
+INFO:     Application startup complete.
+INFO:app.api.endpoints.models:Request received to activate model 'meta-llama/Llama-3.2-3B-Instruct' on effective backend 'ollama'.
+INFO:services.llm_service:Request to set active backend: type='ollama', model='meta-llama/Llama-3.2-3B-Instruct'
+INFO:services.llm_backends:OllamaBackend initialized: URL='http://localhost:11434', Model='meta-llama/Llama-3.2-3B-Instruct'
+INFO:services.llm_service:Backend 'ollama' configured and ready with model 'meta-llama/Llama-3.2-3B-Instruct'.
+INFO:     127.0.0.1:45400 - "POST /api/v1/models/load HTTP/1.1" 202 Accepted
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Stored user message (ID: 40).
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Performing RAG search within documents: ['61eccba3-49c5-418c-b5a3-e92166f763ce']
+INFO:services.embedding_service:Generating embeddings for 1 text chunks...
+INFO:services.embedding_service:Generated and converted 1 embeddings in 0.13 seconds.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Retrieved 3 chunks for RAG context.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Retrieved last 9 messages for history.
+WARNING:app.api.endpoints.sessions:Tokenizer or max_length not found in llm_state, prompt truncation might be inaccurate if needed.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Sending prompt to LLM 'meta-llama/Llama-3.2-3B-Instruct' via backend 'ollama'...
+INFO:services.llm_service:Running API generation via ollama backend...
+INFO:services.llm_backends:Generating text via Ollama backend (model: meta-llama/Llama-3.2-3B-Instruct)...
+INFO:httpx:HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 404 Not Found"
+ERROR:services.llm_backends:Ollama API request failed (HTTP 404): {"error":"model 'meta-llama/Llama-3.2-3B-Instruct' not found"}
+ERROR:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] LLM generation failed: Exception: LLM generation failed or returned None.
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 459, in add_message_to_session
+    raise Exception("LLM generation failed or returned None.")
+Exception: LLM generation failed or returned None.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Stored assistant message (ID: 41).
+INFO:     127.0.0.1:37862 - "POST /api/v1/sessions/9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7/messages HTTP/1.1" 201 Created
+
+1.  **Analyze the Log:**
+    *   The request flow looks good up until the Ollama call.
+    *   Backend is configured correctly: `Backend 'ollama' configured and ready with model 'meta-llama/Llama-3.2-3B-Instruct'`.
+    *   RAG and history retrieval complete.
+    *   Prompt construction proceeds (with the warning about tokenizer/max_length, which is okay for Ollama).
+    *   The correct service path is taken: `Running API generation via ollama backend...` and `Generating text via Ollama backend (model: meta-llama/Llama-3.2-3B-Instruct)...`.
+    *   The `httpx` request is made: `POST http://localhost:11434/api/generate`.
+    *   **The Error:** `HTTP/1.1 404 Not Found` from Ollama.
+    *   **Ollama Error Message:** `{"error":"model 'meta-llama/Llama-3.2-3B-Instruct' not found"}`.
+    *   The rest of the flow correctly identifies the generation failure (`LLM generation failed or returned None.`) and stores an error message.
+
+2.  **Identify the Root Cause:** The Ollama server running at `http://localhost:11434` does not recognize the model identifier `"meta-llama/Llama-3.2-3B-Instruct"`.
+
+3.  **Reason:** Ollama uses its own simplified naming convention or tags for models that you have pulled using `ollama pull`. It doesn't typically use the full Hugging Face repository ID directly in the API request *unless* you have configured Ollama specifically to proxy or map names (which is not the default). By default, you need to use the name Ollama knows the model by.
+
+4.  **How to Find Ollama Model Names:** Open a terminal and run `ollama list`. This command will show the models that Ollama has downloaded and the names/tags it uses for them (e.g., `llama3:latest`, `llama3.1:latest`, `mistral:latest`, etc.).
+
+5.  **Solution:**
+    *   Determine the correct model name/tag for Llama 3.1 8B Instruct *as recognized by your local Ollama instance*. Let's assume, for example, it's `llama3.1:8b-instruct` (this might vary based on how you pulled it).
+    *   Modify the `POST /api/v1/models/load` request in your client application (e.g., the curl command or Swagger UI) to use *that specific Ollama tag* in the `model_name_or_path` field when the backend is set to `ollama`.
+
+6.  **Refine the Thought Process:** The server architecture is working correctly. It correctly identified the backend as Ollama, used the provided model identifier (`meta-llama/Llama-3.2-3B-Instruct`), and sent it to the configured Ollama URL. The error originates *from the Ollama server itself*, indicating the model identifier passed from our server isn't one Ollama recognizes. The fix lies in providing the *correct Ollama-specific model tag* during the `/load` request.
+
+Okay, this log shows the interaction with the Ollama backend is happening correctly, but the Ollama server itself is rejecting the request.
+
+**Diagnosis:**
+
+1.  **Backend Correctly Set:** The server successfully configured the Ollama backend with the model name `meta-llama/Llama-3.2-3B-Instruct`.
+2.  **API Call Made:** The `OllamaBackend.generate` method correctly sent a POST request to `http://localhost:11434/api/generate`.
+3.  **Ollama Server Response:** The Ollama server responded with `HTTP/1.1 404 Not Found`.
+4.  **Ollama Error Message:** The specific error from Ollama is `{"error":"model 'meta-llama/Llama-3.2-3B-Instruct' not found"}`.
+5.  **Root Cause:** The model identifier `"meta-llama/Llama-3.2-3B-Instruct"` that we provided is the standard Hugging Face Hub ID. **Ollama uses its own model naming/tagging system.** You need to use the name that your *local Ollama instance* recognizes for the model you have pulled.
+
+**Solution:**
+
+1.  **Find the Correct Ollama Model Name:**
+    *   Open a terminal on the machine where your Ollama server is running.
+    *   Run the command: `ollama list`
+    *   Look at the output. It will list the models Ollama has downloaded and their associated tags. For example, you might see something like `llama3.1:8b-instruct`, `llama3:latest`, `mistral:latest`, etc. Find the specific tag corresponding to the Llama 3.1 8B Instruct model you want to use.
+
+2.  **Use the Ollama Tag in the API Request:**
+    *   When you make the `POST /api/v1/models/load` request to *your* FastAPI server, use the **Ollama tag** you found in Step 1 in the `model_name_or_path` field.
+    *   **Example:** If `ollama list` shows the model as `llama3.1:8b-instruct`, your request body should be:
+        ```json
+        {
+          "backend_type": "ollama",
+          "model_name_or_path": "llama3.1:8b-instruct"
+        }
+        ```
+        (Make sure your server is configured with `LLM_BACKEND_TYPE=ollama` or pass `"backend_type": "ollama"` in the request).
+
+**After Correcting the Model Name:**
+
+1.  Restart your FastAPI server (if needed, just to be clean).
+2.  Make sure the Ollama server is running.
+3.  Use `POST /api/v1/models/load` with the correct **Ollama model tag** for `model_name_or_path`. Verify the status becomes `Ready`.
+4.  Create a session and send a message.
+
+The request should now succeed because your FastAPI server will pass the correct model tag (e.g., `llama3.1:8b-instruct`) to the Ollama API, which Ollama will recognize.
+
+How do I clear the CUDA memory so I can load and run another model?
+
+
+--> Event: startup
+--> Checking Hugging Face token...
+--> No token found via environment, checking cached login file...
+--> Found Hugging Face token via cached login file ('huggingface-cli login').
+--> Hugging Face token found successfully (Source: Cached Login File).
+INFO:databases:Connected to database sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server_extended/data/rag_server.db
+Database connection established.
+--> Pre-loading embedding model...
+INFO:services.embedding_service:Loading embedding model 'all-MiniLM-L6-v2' onto device 'cuda'...
+INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+INFO:services.embedding_service:Embedding model loaded successfully in 1.25 seconds.
+--> Embedding model loading initiated.
+--> Event: startup complete.
+INFO:     Application startup complete.
+INFO:app.api.endpoints.models:Request received to activate model 'ibm-granite/granite-3.1-8b-instruct' on effective backend 'local'.
+INFO:services.llm_service:Request to set active backend: type='local', model='ibm-granite/granite-3.1-8b-instruct'
+INFO:services.llm_backends:LocalTransformersBackend initialized (inactive).
+INFO:services.llm_service:Scheduling local model load task: model='ibm-granite/granite-3.1-8b-instruct', device='cuda', quantization='None'
+INFO:     127.0.0.1:45422 - "POST /api/v1/models/load HTTP/1.1" 202 Accepted
+INFO:services.llm_service:[Local Loader] Starting task for 'ibm-granite/granite-3.1-8b-instruct' on device 'cuda' q: 'None'...
+INFO:services.llm_service:[Local Loader] Loading tokenizer for 'ibm-granite/granite-3.1-8b-instruct'...
+tokenizer_config.json: 100%|███████████████| 8.07k/8.07k [00:00<00:00, 43.9MB/s]
+vocab.json: 100%|████████████████████████████| 777k/777k [00:00<00:00, 1.88MB/s]
+merges.txt: 100%|████████████████████████████| 442k/442k [00:00<00:00, 9.45MB/s]
+tokenizer.json: 100%|██████████████████████| 3.48M/3.48M [00:00<00:00, 5.52MB/s]
+added_tokens.json: 100%|██████████████████████| 87.0/87.0 [00:00<00:00, 953kB/s]
+special_tokens_map.json: 100%|█████████████████| 701/701 [00:00<00:00, 7.35MB/s]
+INFO:services.llm_service:[Local Loader] Tokenizer loaded.
+INFO:services.llm_service:[Local Loader] Initializing pipeline: model='ibm-granite/granite-3.1-8b-instruct', device_map='cuda', q_config=None
+Loading checkpoint shards:   0%|                          | 0/4 [00:01<?, ?it/s]
+ERROR:services.llm_service:[Local Loader] Failed to load model 'ibm-granite/granite-3.1-8b-instruct': OutOfMemoryError: CUDA out of memory. Tried to allocate 100.00 MiB. GPU 0 has a total capacity of 15.60 GiB of which 80.69 MiB is free. Process 15389 has 6.25 GiB memory in use. Process 519474 has 5.91 GiB memory in use. Including non-PyTorch memory, this process has 3.12 GiB memory in use. Of the allocated memory 2.86 GiB is allocated by PyTorch, and 23.22 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/services/llm_service.py", line 165, in _load_local_model_task
+    pipeline_instance = pipeline(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/pipelines/__init__.py", line 942, in pipeline
+    framework, model = infer_framework_load_model(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/pipelines/base.py", line 291, in infer_framework_load_model
+    model = model_class.from_pretrained(model, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/models/auto/auto_factory.py", line 573, in from_pretrained
+    return model_class.from_pretrained(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/modeling_utils.py", line 272, in _wrapper
+    return func(*args, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/modeling_utils.py", line 4455, in from_pretrained
+    ) = cls._load_pretrained_model(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/modeling_utils.py", line 4884, in _load_pretrained_model
+    disk_offload_index, cpu_offload_index = _load_state_dict_into_meta_model(
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/modeling_utils.py", line 852, in _load_state_dict_into_meta_model
+    {param_type: param.to(param_device)},
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 100.00 MiB. GPU 0 has a total capacity of 15.60 GiB of which 80.69 MiB is free. Process 15389 has 6.25 GiB memory in use. Process 519474 has 5.91 GiB memory in use. Including non-PyTorch memory, this process has 3.12 GiB memory in use. Of the allocated memory 2.86 GiB is allocated by PyTorch, and 23.22 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+INFO:services.llm_service:[Local Loader] Task for 'ibm-granite/granite-3.1-8b-instruct' finished in 4.56s. Status: Failed
+
+You've encountered the classic `CUDA out of memory` error. This means your GPU doesn't have enough free VRAM (Video RAM) to load the new model (`ibm-granite/granite-3.1-8b-instruct`) you requested.
+
+**How We Clear Memory (and Why it Didn't Prevent This Error Here):**
+
+Our current code *does* have logic to clear memory when switching models using the `local` backend. This happens in the `_unload_current_backend` function (called by `set_active_backend` *before* attempting to load the new model), which in turn calls the `unload` method of the `LocalTransformersBackend`:
+
+```python
+# services/llm_backends.py (inside LocalTransformersBackend.unload)
+async def unload(self):
+    """Unloads the local model and clears memory."""
+    logger.info(f"Unloading local model '{self.model_name_or_path}'...")
+    # ... (keep references to objects) ...
+    pipeline_to_del = self.pipeline
+    model_to_del = getattr(pipeline_to_del, 'model', None) if pipeline_to_del else None
+    tokenizer_to_del = self.tokenizer
+
+    self.pipeline = None
+    self.tokenizer = None
+    # ... (reset other attributes) ...
+
+    # --- Explicit Deletion and Cache Clearing ---
+    del pipeline_to_del
+    del model_to_del
+    del tokenizer_to_del
+
+    import gc, torch # Import locally for unload
+    gc.collect() # Run Python garbage collection
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache() # Ask PyTorch to release unused cached memory on GPU
+    # --- End Deletion ---
+    logger.info("Local model unloaded and memory cleared.")
+```
+
+**Key Elements:**
+
+1.  **`del` statements:** We explicitly delete references to the `pipeline`, the underlying `model`, and the `tokenizer`. This signals to Python's garbage collector that these objects might be eligible for cleanup.
+2.  **`gc.collect()`:** Forces Python's garbage collector to run, attempting to reclaim memory from objects that are no longer referenced.
+3.  **`torch.cuda.empty_cache()`:** This is the crucial PyTorch function that tells PyTorch to release **cached** GPU memory blocks that it was holding onto for potential reuse but are not currently occupied by active tensors.
+
+**Why Did the Error Still Happen?**
+
+Even though we have the cleanup logic, you can still run out of memory because:
+
+1.  **Embedding Model:** The `all-MiniLM-L6-v2` embedding model is loaded on startup and **stays loaded** on the GPU. It consumes VRAM continuously.
+2.  **New Model Size:** The `ibm-granite/granite-3.1-8b-instruct` model is an 8-billion parameter model. Even in float16, this requires a significant amount of VRAM (roughly 2 * 8 = 16 GB just for weights, plus memory for activations during inference/loading).
+3.  **Fragmentation/Reserved Memory:** As the PyTorch error message hints (`23.22 MiB is reserved by PyTorch but unallocated`), sometimes memory becomes fragmented, or PyTorch reserves blocks it can't immediately free, even after `empty_cache()`.
+4.  **Other Processes:** The error message also shows memory used by other processes (`Process 15389 has 6.25 GiB memory in use. Process 519474 has 5.91 GiB memory in use`). Your GPU VRAM is shared. If other applications (even background ones, potentially another Python process or GUI elements) are using VRAM, less is available for your LLM server. In this case, those processes plus the embedding model likely left insufficient space for the 8B Granite model. The error states only `80.69 MiB` was free when it needed `100.00 MiB` just for the next allocation step.
+
+**How to Address the OutOfMemoryError:**
+
+Since our unloading code is already doing the standard cleanup (`del`, `gc.collect`, `torch.cuda.empty_cache`), trying to clear *more* memory isn't really possible within the running Python process. The solutions involve reducing the memory requirement or freeing up external usage:
+
+1.  **Quantization (Recommended):** This is the most effective way to fit larger models. Load the Granite model with 8-bit or 4-bit quantization. This significantly reduces the VRAM needed for the model weights.
+    *   **API Request:** Send this in the `POST /load` request body:
+        ```json
+        {
+          "model_name_or_path": "ibm-granite/granite-3.1-8b-instruct",
+          "quantization": "4bit" // Or "8bit"
+        }
+        ```
+    *   **Requirement:** Ensure `bitsandbytes` is correctly installed and working in your environment.
+
+2.  **Unload Embedding Model:** If you *really* need to fit the full-precision 8B model and don't need embeddings simultaneously, you could modify the server to *also* unload the embedding model when loading a large LLM, and reload it later if needed. This adds complexity.
+
+3.  **Use a Smaller LLM:** Choose a smaller base model (like `gpt2`, `distilgpt2`, `TinyLlama`, or smaller Granite variants if available) that fits alongside the embedding model.
+
+4.  **Stop Other GPU Processes:** Identify the processes using significant VRAM (using `nvidia-smi` in a separate terminal) and stop them if they aren't essential.
+
+5.  **Use API Backend:** Offload the LLM inference entirely to Ollama or vLLM running on the same machine (if it fits there) or a different machine.
+
+**In summary:** The memory clearing code is already in place and functioning as expected during the model transition. The `OutOfMemoryError` occurs because the *total required VRAM* (embedding model + new LLM + overhead) exceeds your GPU's capacity *after* the previous LLM was unloaded. The best solution is usually **quantization**.
+
+INFO:     127.0.0.1:43276 - "POST /api/v1/models/load HTTP/1.1" 202 Accepted
+INFO:services.llm_service:[Local Loader] Starting task for 'ibm-granite/granite-3.1-2b-instruct' on device 'cuda' q: '4bit'...
+INFO:services.llm_service:[Local Loader] Applying 4-bit quantization (nf4).
+INFO:services.llm_service:[Local Loader] Loading tokenizer for 'ibm-granite/granite-3.1-2b-instruct'...
+INFO:services.llm_service:[Local Loader] Tokenizer loaded.
+INFO:services.llm_service:[Local Loader] Initializing pipeline: model='ibm-granite/granite-3.1-2b-instruct', device_map='auto', q_config=Set
+INFO:accelerate.utils.modeling:We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+Loading checkpoint shards: 100%|██████████████████| 2/2 [00:00<00:00,  3.12it/s]
+Device set to use cuda:0
+INFO:services.llm_service:[Local Loader] Successfully loaded model 'ibm-granite/granite-3.1-2b-instruct' in 0.88s.
+INFO:services.llm_service:[Local Loader] Determined model max length: 131072
+INFO:services.llm_service:[Local Loader] Task for 'ibm-granite/granite-3.1-2b-instruct' finished in 0.88s. Status: Ready
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Stored user message (ID: 46).
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Performing RAG search within documents: ['61eccba3-49c5-418c-b5a3-e92166f763ce']
+INFO:services.embedding_service:Generating embeddings for 1 text chunks...
+INFO:services.embedding_service:Generated and converted 1 embeddings in 0.12 seconds.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Retrieved 3 chunks for RAG context.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Retrieved last 10 messages for history.
+WARNING:app.api.endpoints.sessions:Tokenizer or max_length not found in llm_state, prompt truncation might be inaccurate if needed.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Sending prompt to LLM 'ibm-granite/granite-3.1-2b-instruct' via backend 'local'...
+INFO:services.llm_service:Running local generation in executor...
+ERROR:services.llm_service:Error during call to backend generate method: coroutines cannot be used with run_in_executor()
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/services/llm_service.py", line 261, in generate_text
+    result = await loop.run_in_executor(None, backend.generate, prompt, config) # Pass config
+  File "uvloop/loop.pyx", line 2735, in uvloop.loop.Loop.run_in_executor
+TypeError: coroutines cannot be used with run_in_executor()
+ERROR:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] LLM generation failed: Exception: LLM generation failed or returned None.
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 459, in add_message_to_session
+    raise Exception("LLM generation failed or returned None.")
+Exception: LLM generation failed or returned None.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Stored assistant message (ID: 47).
+INFO:     127.0.0.1:38040 - "POST /api/v1/sessions/9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7/messages HTTP/1.1" 201 Created
+
+Ah, it seems we've reintroduced the `TypeError: coroutines cannot be used with run_in_executor()` error, but this time it's happening *inside* the `llm_service.generate_text` function when trying to call the `LocalTransformersBackend.generate` method.
+
+**Diagnosis:**
+
+1.  **Model Loaded:** The smaller `ibm-granite/granite-3.1-2b-instruct` model loaded successfully with 4-bit quantization.
+2.  **RAG/History OK:** These steps completed.
+3.  **Error Location:** The error occurs within `llm_service.generate_text` when handling the `LocalTransformersBackend`:
+    ```
+    File "/home/ken/Documents/gestalt/rag_llm_server_extended/services/llm_service.py", line 261, in generate_text
+        result = await loop.run_in_executor(None, backend.generate, prompt, config) # Pass config
+    File "uvloop/loop.pyx", line 2735, in uvloop.loop.Loop.run_in_executor
+    TypeError: coroutines cannot be used with run_in_executor()
+    ```
+4.  **Root Cause:** This error means that the function we passed to `run_in_executor` (`backend.generate`, which points to `LocalTransformersBackend.generate`) is an `async def` function (a coroutine function), not a regular synchronous function. `run_in_executor` is meant for running blocking, *synchronous* code in a thread pool.
+5.  **Checking `LocalTransformersBackend.generate`:** Looking back at `services/llm_backends.py`, we defined `LocalTransformersBackend.generate` as:
+    ```python
+    class LocalTransformersBackend(LLMBackendBase):
+        # ... init ...
+        async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]: # <--- It's async!
+            # ... implementation ...
+    ```
+    We incorrectly defined this method as `async def`. The actual blocking call is the `self.pipeline(...)` call *inside* this method. The method itself doesn't need to be `async`.
+
+**Solution:**
+
+Make the `generate` method within the `LocalTransformersBackend` class **synchronous** (remove the `async` keyword).
+
+**Modify `services/llm_backends.py`:**
+
+```python
+# services/llm_backends.py
+# ... (imports, LLMBackendBase) ...
+
+# --- Local Transformers Backend ---
+class LocalTransformersBackend(LLMBackendBase):
+    def __init__(self):
+        # ... (attributes: pipeline, tokenizer, etc.) ...
+        logger.info("LocalTransformersBackend initialized (inactive).")
+
+    # --- REMOVE 'async' from this method definition ---
+    def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+    # --- END CHANGE ---
+        # This will contain the refined pipeline call logic from generate_text
+        if self.pipeline is None or self.tokenizer is None:
+            logger.error("Local pipeline/tokenizer not loaded.")
+            return None
+
+        try:
+            logger.info("Generating text with local Transformers pipeline...")
+            # ... (prepare generation_kwargs - unchanged) ...
+            generation_keys = {"max_new_tokens", "temperature", "top_p", "top_k"}
+            generation_kwargs = {k: config[k] for k in generation_keys if k in config}
+            generation_kwargs["do_sample"] = True
+            generation_kwargs["num_return_sequences"] = 1
+            generation_kwargs["repetition_penalty"] = config.get("repetition_penalty", 1.15)
+
+            logger.debug(f"Passing generation kwargs to pipeline: {generation_kwargs}")
+
+            # NOTE: This pipeline call IS BLOCKING CPU/GPU
+            outputs = self.pipeline(prompt, **generation_kwargs)
+
+            # ... (extraction logic - unchanged) ...
+            full_generated_text = outputs[0]['generated_text']
+            # ... (find marker, extract result) ...
+
+            logger.info("Local LLM text generation complete.")
+            return result
+
+        except Exception as e:
+            logger.error(f"Local LLM text generation failed: {e}", exc_info=True)
+            return None
+
+    # ... (get_status_dict - unchanged) ...
+
+    # --- unload should remain async as it might do I/O or wait ---
+    async def unload(self):
+        # ... (unload logic - unchanged) ...
+
+# ... (OllamaBackend, VLLMBackend, InstructLabBackend remain the same, their generate methods ARE async) ...
+
+```
+
+**Explanation:**
+
+*   We simply removed the `async` keyword from `def generate(...)` in the `LocalTransformersBackend` class.
+*   The method now correctly defines a synchronous function.
+*   The `llm_service.generate_text` function will still correctly call this synchronous function using `await loop.run_in_executor(None, backend.generate, ...)`, which is the intended way to run synchronous blocking code from an async context.
+*   The `generate` methods for the API backends (`OllamaBackend`, `VLLMBackend`) remain `async def` because they use `await self.client.post(...)`.
+
+**After Applying the Fix:**
+
+1.  Save the updated `services/llm_backends.py`.
+2.  Restart Uvicorn.
+3.  Load the local quantized Granite model again.
+4.  Create a session and send a message.
+
+The `TypeError: coroutines cannot be used with run_in_executor()` should be resolved because `llm_service.generate_text` will now correctly pass the *synchronous* `LocalTransformersBackend.generate` function to the executor.
+
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/services/llm_backends.py", line 62, in generate
+    outputs = self.pipeline(prompt, **generation_kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/pipelines/text_generation.py", line 287, in __call__
+    return super().__call__(text_inputs, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/pipelines/base.py", line 1371, in __call__
+    return self.run_single(inputs, preprocess_params, forward_params, postprocess_params)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/pipelines/base.py", line 1378, in run_single
+    model_outputs = self.forward(model_inputs, **forward_params)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/pipelines/base.py", line 1278, in forward
+    model_outputs = self._forward(model_inputs, **forward_params)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/pipelines/text_generation.py", line 385, in _forward
+    output = self.model.generate(input_ids=input_ids, attention_mask=attention_mask, **generate_kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/generation/utils.py", line 2086, in generate
+    self._validate_model_kwargs(model_kwargs.copy())
+  File "/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/transformers/generation/utils.py", line 1450, in _validate_model_kwargs
+    raise ValueError(
+ValueError: The following `model_kwargs` are not used by the model: ['quantization_config'] (note: typos in the generate arguments will also show up in this list)
+ERROR:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] LLM generation failed: Exception: LLM generation failed or returned None.
+Traceback (most recent call last):
+  File "/home/ken/Documents/gestalt/rag_llm_server_extended/app/api/endpoints/sessions.py", line 459, in add_message_to_session
+    raise Exception("LLM generation failed or returned None.")
+Exception: LLM generation failed or returned None.
+INFO:app.api.endpoints.sessions:[Session:9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7] Stored assistant message (ID: 49).
+INFO:     127.0.0.1:59734 - "POST /api/v1/sessions/9f89ccbf-c19f-4c07-8cba-cfbf99d2b3e7/messages HTTP/1.1" 201 Created
+
+Ah, another argument validation error, similar to the `cache_dir` issue before, but this time it's `quantization_config`.
+
+**Diagnosis:**
+
+1.  **Error Location:** The error originates within the `transformers` library during the `self.model.generate()` call, which is invoked by the `self.pipeline()` call in `LocalTransformersBackend.generate`.
+2.  **Error Message:** `ValueError: The following model_kwargs are not used by the model: ['quantization_config'] ...`
+3.  **Root Cause:** `quantization_config` is an argument used during **model loading** (`pipeline(...)` or `AutoModelForCausalLM.from_pretrained(...)`) to configure how the model's weights are loaded (e.g., in 4-bit or 8-bit). It is **not** a valid parameter for the **generation** step (`model.generate(...)` or the pipeline call used for inference). The `transformers` library correctly identifies that this argument isn't used for generation and raises the error.
+4.  **Where it's Coming From:** Although we carefully filtered arguments in `generate_text` within `llm_service.py` before calling the backend, it seems the `pipeline` object *itself* might be implicitly passing some of its initialization configuration along when called for generation.
+
+**Solution:**
+
+This indicates a potential nuance or bug in how the `transformers` pipeline handles or passes arguments internally. Since we cannot directly control what the instantiated `pipeline` object passes to `model.generate`, the most robust solution is often to **bypass the pipeline for generation when fine-grained control is needed** and call `model.generate()` directly.
+
+Let's modify the `LocalTransformersBackend.generate` method to use the tokenizer and model directly.
+
+**Modify `services/llm_backends.py`:**
+
+```python
+# services/llm_backends.py
+import logging
+import abc
+from typing import Dict, Any, Optional, AsyncGenerator
+import torch # Import torch here
+
+import httpx
+from core.config import settings
+# Import specific transformers classes needed
+from transformers import PreTrainedTokenizerBase, PreTrainedModel
+
+logger = logging.getLogger(__name__)
+
+# ... (LLMBackendBase class) ...
+
+class LocalTransformersBackend(LLMBackendBase):
+    def __init__(self):
+        # Keep pipeline for now? Or just store model and tokenizer?
+        # Let's store model and tokenizer directly for more control.
+        # self.pipeline = None # Remove pipeline if generating directly
+        self.model: Optional[PreTrainedModel] = None # Store the model
+        self.tokenizer: Optional[PreTrainedTokenizerBase] = None # Store the tokenizer
+        self.model_name_or_path: Optional[str] = None
+        self.load_config: Dict[str, Any] = {}
+        self.max_model_length: Optional[int] = None
+        logger.info("LocalTransformersBackend initialized (inactive).")
+
+    def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        # Generate using model and tokenizer directly
+        if self.model is None or self.tokenizer is None:
+            logger.error("Local model/tokenizer not loaded.")
+            return None
+
+        try:
+            logger.info("Generating text with local model.generate()...")
+
+            # 1. Tokenize the input prompt
+            # Ensure padding side is set correctly if needed (often left for generation)
+            # self.tokenizer.padding_side = "left" # Uncomment if model requires left padding
+            inputs = self.tokenizer(prompt, return_tensors="pt", return_attention_mask=True)
+            # Move inputs to the same device as the model
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+            # 2. Prepare generation arguments (filter from global config)
+            generation_keys = {"max_new_tokens", "temperature", "top_p", "top_k", "repetition_penalty"}
+            generation_kwargs = {k: config[k] for k in generation_keys if k in config}
+            # Add other necessary generate() arguments
+            generation_kwargs["do_sample"] = True
+            # Add pad_token_id if tokenizer has it, otherwise use eos_token_id
+            generation_kwargs["pad_token_id"] = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+
+
+            logger.debug(f"Passing generation kwargs to model.generate: {generation_kwargs}")
+
+            # 3. Call model.generate()
+            # Ensure no blocking operations outside executor if needed (generate itself is blocking)
+            with torch.no_grad(): # Disable gradient calculation for inference
+                 outputs = self.model.generate(
+                     **inputs,
+                     **generation_kwargs
+                 )
+
+            # 4. Decode the output tokens, skipping prompt tokens and special tokens
+            # outputs[0] contains the full sequence (prompt + generation)
+            # input_ids_len = inputs['input_ids'].shape[1] # Length of the input prompt tokens
+            # generated_token_ids = outputs[0][input_ids_len:] # Get only generated tokens
+            # result = self.tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+
+            # --- OR: Decode the full output and clean (simpler) ---
+            full_generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            logger.debug(f"LLM Raw Decoded Output (skip_special_tokens=True):\n{full_generated_text}")
+
+            # Use the same prompt cleaning logic as before (find marker)
+            response_marker = "\n### RESPONSE:"
+            prompt_marker_pos = prompt.rfind(response_marker)
+            # Clean the *original* prompt (remove marker part) before checking startswith
+            prompt_base = prompt[:prompt_marker_pos] if prompt_marker_pos != -1 else prompt
+
+            if full_generated_text.startswith(prompt_base):
+                 # Try extracting after the *original* full prompt if marker logic fails
+                 result = full_generated_text[len(prompt):].strip()
+                 if not result and prompt_marker_pos != -1: # If removing full prompt failed, try marker again
+                     response_start_pos = prompt_marker_pos + len(response_marker)
+                     result = full_generated_text[response_start_pos:].strip()
+                 logger.debug("Extracted response by removing prompt.")
+
+            elif prompt_marker_pos != -1 and response_marker in full_generated_text:
+                 # Maybe prompt isn't exactly at start, find marker in output
+                  response_start_pos = full_generated_text.rfind(response_marker) + len(response_marker)
+                  result = full_generated_text[response_start_pos:].strip()
+                  logger.debug("Extracted response by finding marker in output.")
+            else:
+                 # Fallback: Assume output is only the response (less likely with generate)
+                 logger.warning("Cannot determine prompt end in generated text. Using full decoded text.")
+                 result = full_generated_text.strip()
+
+
+            if not result:
+                 logger.warning("Extraction resulted in an empty string.")
+
+            logger.info("Local LLM text generation complete.")
+            return result
+
+        except Exception as e:
+            logger.error(f"Local LLM text generation failed: {e}", exc_info=True)
+            return None
+
+    def get_status_dict(self) -> Dict[str, Any]:
+         return {
+             "active_model": self.model_name_or_path,
+             "load_config": self.load_config,
+             "max_model_length": self.max_model_length,
+             "model_device": str(self.model.device) if self.model else None, # Add device info
+         }
+
+    async def unload(self):
+        """Unloads the local model and clears memory."""
+        logger.info(f"Unloading local model '{self.model_name_or_path}'...")
+        # Keep references to delete them explicitly
+        model_to_del = self.model
+        tokenizer_to_del = self.tokenizer
+
+        self.model = None # Clear model ref
+        self.tokenizer = None
+        self.model_name_or_path = None
+        self.load_config = {}
+        self.max_model_length = None
+
+        del model_to_del
+        del tokenizer_to_del
+
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("Local model unloaded and memory cleared.")
+
+# ... (OllamaBackend, VLLMBackend, InstructLabBackend) ...
+```
+
+**And modify `_load_local_model_task` in `services/llm_service.py` to load model/tokenizer instead of pipeline:**
+
+```python
+# services/llm_service.py
+# ... (imports) ...
+# Import base model/tokenizer types
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
+# Remove pipeline import if not used elsewhere
+# from transformers import pipeline
+
+# ... (LLMStatus Enum, llm_state dictionary) ...
+# ... (list_local_models, list_cached_hub_models) ...
+# ... (_unload_current_backend) ...
+
+async def _load_local_model_task(
+    backend: LocalTransformersBackend,
+    model_id: str,
+    device: str,
+    quantization: Optional[str]
+):
+    """Loads a model and tokenizer into the LocalTransformersBackend instance."""
+    task_start_time = time.time()
+    logger.info(f"[Local Loader] Starting task for '{model_id}' on device '{device}' q: '{quantization}'...")
+
+    llm_state["status"] = LLMStatus.LOADING
+    llm_state["last_error"] = None
+    backend.model_name_or_path = model_id
+
+    try:
+        load_start_time = time.time()
+        quantization_config = None
+        # Determine device map strategy for AutoModel
+        # Use 'auto' for multi-gpu or quantization, explicit device for single GPU full precision
+        device_map = "auto" if quantization or torch.cuda.device_count() > 1 else device
+        if device == "cpu":
+             device_map = None # Don't use device_map for CPU
+
+        logger.info(f"[Local Loader] Effective device_map strategy: '{device_map}'")
+
+        if quantization:
+            # ... (Quantization config logic - same as before) ...
+              if quantization == "8bit" and torch.cuda.is_available():
+                 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+                 logger.info("[Local Loader] Applying 8-bit quantization.")
+              elif quantization == "4bit" and torch.cuda.is_available():
+                  quantization_config = BitsAndBytesConfig(
+                     load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
+                     bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
+                 )
+                  logger.info("[Local Loader] Applying 4-bit quantization (nf4).")
+              else:
+                 logger.warning(f"[Local Loader] Quantization '{quantization}' not supported/applicable. Loading full precision.")
+                 quantization = None
+
+        # --- Load Tokenizer ---
+        logger.info(f"[Local Loader] Loading tokenizer for '{model_id}'...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id, trust_remote_code=True,
+            cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve())
+        )
+        logger.info("[Local Loader] Tokenizer loaded.")
+
+        # --- Load Model ---
+        logger.info(f"[Local Loader] Loading model '{model_id}'...")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            device_map=device_map, # Use determined device_map
+            quantization_config=quantization_config,
+            torch_dtype=torch.float16 if device == "cuda" and not quantization else None, # Use float16 on GPU if not quantizing to bitsandbytes native types
+            trust_remote_code=True,
+            cache_dir=str(settings.HUGGINGFACE_HUB_CACHE.resolve())
+        )
+        logger.info("[Local Loader] Model loaded successfully.")
+
+        load_time = time.time() - load_start_time
+        logger.info(f"[Local Loader] Successfully loaded model '{model_id}' in {load_time:.2f}s.")
+
+        max_len = getattr(model.config, "max_position_embeddings", None) \
+                  or getattr(tokenizer, "model_max_length", None) \
+                  or 1024 # Default fallback
+        logger.info(f"[Local Loader] Determined model max length: {max_len}")
+
+        # --- Update the specific backend instance ---
+        backend.model = model # Store model
+        backend.tokenizer = tokenizer
+        backend.model_name_or_path = model_id
+        backend.load_config = {"device": device, "quantization": quantization}
+        backend.max_model_length = max_len
+
+        # --- Update global state ---
+        llm_state["status"] = LLMStatus.READY
+        llm_state["active_model"] = model_id
+        llm_state["last_error"] = None
+
+    except Exception as e:
+        # ... (Error handling - clear backend.model, backend.tokenizer) ...
+        error_message = f"[Local Loader] Failed to load model '{model_id}': {type(e).__name__}: {e}"
+        logger.error(error_message, exc_info=True)
+        backend.model = None # Ensure refs are cleared on error
+        backend.tokenizer = None
+        llm_state["status"] = LLMStatus.FAILED
+        llm_state["last_error"] = error_message
+        llm_state["active_model"] = None
+    finally:
+        task_duration = time.time() - task_start_time
+        logger.info(f"[Local Loader] Task for '{model_id}' finished in {task_duration:.2f}s. Status: {llm_state['status'].value}")
+
+# ... (rest of llm_service.py, generate_text should still work as it calls backend.generate) ...
+
+```
+
+**Explanation of Changes:**
+
+1.  **`LocalTransformersBackend`:**
+    *   Stores `self.model` and `self.tokenizer` directly instead of `self.pipeline`.
+    *   `generate` method now explicitly tokenizes the input, calls `self.model.generate(**inputs, **generation_kwargs)`, and decodes the output tokens. This bypasses the pipeline layer entirely for generation.
+    *   Includes `with torch.no_grad():` during generation for efficiency.
+    *   Moves input tensors to the model's device.
+    *   Adds `pad_token_id` to generation kwargs.
+    *   Refined the logic to extract the response after the `### RESPONSE:` marker, trying different approaches if the simple prefix removal fails.
+    *   `unload` now deletes `self.model`.
+    *   `get_status_dict` added `model_device`.
+2.  **`_load_local_model_task`:**
+    *   Now imports `AutoModelForCausalLM`.
+    *   Loads the model using `AutoModelForCausalLM.from_pretrained(...)`.
+    *   Loads the tokenizer separately using `AutoTokenizer.from_pretrained(...)`.
+    *   Sets the `backend.model` and `backend.tokenizer` attributes instead of `backend.pipeline`.
+    *   Adjusted `device_map` logic slightly for `AutoModel`.
+
+**After Applying Fixes:**
+
+1.  Save both modified files (`llm_backends.py` and `llm_service.py`).
+2.  Restart Uvicorn.
+3.  Load the local quantized Granite model.
+4.  Create session, send message.
+
+This direct use of `model.generate` should avoid passing the `quantization_config` (or other loading-specific arguments) into the generation step, resolving the `ValueError`.
+
+"You are a python programming AI LLM server expert. You are also an experience instructional designer and technical writer. Review all of the code we have created thoroughly and carefully. Provide a brief analysis of the server and API. The produce the following deliverables:
+
+[a] a step by step guide with annotations explaining the reasons for writing the components of the LLM server and API.
+[b] an environment setup quick start guide.
+[c] a glossary of terms.
+[d] a list of future features to consider adding to make this LLM server complete."
+
+Okay, this has been a fantastic collaborative journey building this RAG LLM server! Let's review the architecture and provide the requested documentation.
+
+**Overall Analysis**
+
+We have successfully built a comprehensive and modular RAG LLM server using FastAPI.
+
+**Strengths:**
+
+*   **Modularity:** Clear separation of concerns between API endpoints, services (document processing, embedding, LLM management, system status), data models (Pydantic), database interaction, and configuration.
+*   **Asynchronous:** Leverages FastAPI and async libraries (`databases`, `httpx`) for potentially high I/O concurrency. Blocking tasks (local LLM inference/loading, summarization) are correctly offloaded to executor threads.
+*   **RAG Core:** Implements the fundamental RAG pipeline: document ingestion (upload, parse, chunk, embed), storage (SQLite metadata, ChromaDB vectors), retrieval (semantic search), and integration into LLM prompts.
+*   **Flexible LLM Backend:** Supports multiple LLM backends (local `transformers`, Ollama, vLLM via API) selected through configuration or API request, providing significant flexibility.
+*   **State Management:** Handles LLM loading status, active model configuration, and chat session persistence.
+*   **Comprehensive Features:** Includes document management, multi-backend LLM support, chat session handling with RAG context, system status monitoring, and basic Hugging Face authentication checks.
+*   **Modern Tooling:** Utilizes popular and well-regarded libraries like FastAPI, Pydantic, SQLAlchemy, ChromaDB, Transformers, Sentence-Transformers, and psutil.
+
+**Areas for Potential Improvement (Beyond Scope of Initial Build):**
+
+*   **RAG Strategy:** The current RAG implementation is basic (retrieve-then-read). Advanced strategies like re-ranking search results, query transformations, or more sophisticated context injection could improve relevance. The summarization step adds latency and its config modification isn't thread-safe.
+*   **Error Handling:** While basic error handling exists, more granular error types, user-friendly error messages, and potentially retry mechanisms could enhance robustness.
+*   **Prompt Engineering:** The prompt templates are functional but could be further optimized for specific instruction-tuned models.
+*   **Concurrency Safety:** The temporary modification of `llm_state["config"]` during summarization is not safe for concurrent requests to the chat endpoint. A better approach would pass config overrides directly or use dedicated pipelines.
+*   **Testing:** No automated tests (unit, integration) were implemented. Adding tests is crucial for reliability and maintainability.
+*   **API Authentication/Authorization:** The API endpoints are currently open. Adding authentication (e.g., OAuth2, API keys) would be necessary for secure deployment.
+*   **User Interface:** A front-end application would be needed for user interaction beyond API calls.
+*   **Scalability:** For very high loads, components like document processing might benefit from a dedicated task queue (Celery, RQ, Arq) instead of FastAPI's `BackgroundTasks`.
+
+**Overall:** This server provides a strong foundation and demonstrates a complete workflow for a multi-backend RAG system. It's an excellent learning tool and a solid starting point for a more production-ready application.
+
+---
+
+**[a] Step-by-Step Annotated Guide**
+
+This guide explains the purpose of each major component as we built it.
+
+1.  **Step 1: Basic Server Structure (FastAPI)**
+    *   **What:** Set up a minimal FastAPI application (`app/main.py`) run by Uvicorn. Created a root endpoint (`/`).
+    *   **Why:** To establish the core web server framework using a modern, high-performance, async-capable library. Provides basic API structure and automatic documentation (`/docs`).
+
+2.  **Step 2: Configuration & Database Initialization**
+    *   **What:** Defined settings using Pydantic (`core/config.py`), set up SQLite table schemas using SQLAlchemy Core (`db/models.py`), initialized ChromaDB client, and managed database connections (`db/database.py`). Created data directories.
+    *   **Why:** Centralize configuration; define persistent storage for metadata (SQLite) and vectors (ChromaDB); ensure database connections are handled correctly during server startup/shutdown.
+
+3.  **Step 3: Document Upload and Background Processing**
+    *   **What:** Created API endpoints for file upload (`app/api/endpoints/documents.py`). Implemented file handling, text extraction (`services/document_processor.py` using `python-docx`, `pypdf`, `beautifulsoup4`), chunking (`langchain-text-splitters`), and initial SQLite record creation. Used FastAPI `BackgroundTasks` for processing.
+    *   **Why:** To allow users to ingest documents; handle different file types; break large documents into manageable chunks; offload time-consuming processing from the initial API request for better responsiveness.
+
+4.  **Step 4: Vector Embedding Integration**
+    *   **What:** Integrated `sentence-transformers` (`services/embedding_service.py`) to load an embedding model (pre-loaded on startup). Modified the background task to generate embeddings for chunks and store them, along with text and metadata, in ChromaDB. Updated document status in SQLite.
+    *   **Why:** To convert text chunks into numerical representations (vectors) suitable for semantic similarity search, enabling the core RAG functionality.
+
+5.  **Step 5: Search Endpoints**
+    *   **What:** Added API endpoints for keyword search (using SQL `LIKE` against SQLite chunks) and semantic search (embedding the query and querying ChromaDB) within `app/api/endpoints/documents.py`.
+    *   **Why:** To provide tools for retrieving relevant document chunks based on user queries, forming the retrieval part of RAG.
+
+6.  **Step 6: Chat Session and Message Management API**
+    *   **What:** Created API models (`app/api/models/chat.py`) and endpoints (`app/api/endpoints/sessions.py`) for managing chat sessions (CRUD) and messages (add/list). Stored session metadata and message history in SQLite tables (`sessions`, `chat_messages`).
+    *   **Why:** To maintain conversation state, link RAG documents to sessions, and store the prompt-response history needed for context and future interaction.
+
+7.  **Step 7: Integrate RAG and Placeholder LLM Call**
+    *   **What:** Modified the "add message" endpoint to: fetch associated RAG documents, perform semantic search based on the user query, retrieve chat history, construct a detailed prompt (including context/history), simulate an LLM call, and store both user/assistant messages. Added context truncation logic. Added summarization step.
+    *   **Why:** To implement the full RAG loop within a chat context, assembling the necessary information before calling the LLM and handling context window limits. The placeholder simulates the final generation step.
+
+8.  **Step 8: LLM Loading and Management API**
+    *   **What:** Introduced an abstraction layer (`services/llm_backends.py`) for different LLM backends (local, Ollama, vLLM). Refactored `services/llm_service.py` to manage the active backend. Created API endpoints (`app/api/endpoints/models.py`) to list available models, dynamically load/configure the active backend and model (via API request or config defaults), check status, and update generation parameters. Handled local model loading (including quantization via `bitsandbytes`) in background threads.
+    *   **Why:** To provide flexibility in choosing the LLM inference source without changing the core chat logic; manage the complex process of loading/unloading local models safely; allow runtime configuration.
+
+9.  **Step 9: Real LLM Integration & Final Auth/Fixes**
+    *   **What:** Replaced the placeholder LLM call with a call to the active backend via `llm_service.generate_text`, ensuring blocking calls run in an executor. Added a startup check (`app/main.py`) for Hugging Face authentication (`huggingface_hub` token via env/`.env` or CLI cache). Debugged various errors related to argument passing, state access, and library interactions.
+    *   **Why:** To connect the RAG pipeline to an actual LLM for response generation; ensure prerequisites for gated models are met; resolve runtime errors for a functional system.
+
+10. **Step 10: System Status API**
+    *   **What:** Created API endpoints (`app/api/endpoints/system.py`) and a service (`services/system_service.py`) using `psutil` and `pynvml` to report CPU, RAM, Disk, GPU (optional), and Temperature (optional) metrics. Added NVML shutdown to the FastAPI shutdown event.
+    *   **Why:** To provide visibility into the server's resource usage and operational health, aiding monitoring and debugging.
+
+---
+
+**[b] Environment Setup Quick Start Guide**
+
+This guide assumes you have the server code available (e.g., cloned from a Git repository).
+
+**Prerequisites:**
+
+*   **Python:** Version 3.10 or later recommended.
+*   **Git:** To clone the repository (if applicable).
+*   **Conda (Recommended):** Miniconda or Anaconda for managing environments, especially with CUDA. [https://www.anaconda.com/download](https://www.anaconda.com/download)
+*   **(Optional) NVIDIA GPU:** Required for local GPU acceleration.
+*   **(Optional) NVIDIA Driver:** If using GPU, ensure the latest compatible driver is installed. Verify with `nvidia-smi`.
+*   **(Optional) CUDA Toolkit & cuDNN:** Only needed if installing PyTorch via `pip` for GPU (`venv` method). Not usually needed if using `conda`.
+*   **(Optional) `libmagic`:** System library required by `python-magic`.
+    *   Debian/Ubuntu: `sudo apt-get update && sudo apt-get install -y libmagic1`
+    *   macOS: `brew install libmagic`
+    *   Other Linux: Use your package manager (e.g., `yum`, `dnf`).
+
+**Steps:**
+
+1.  **Get the Code:**
+    ```bash
+    # If using git:
+    # git clone <repository_url>
+    cd rag_llm_server_extended # Navigate to the project root directory
+    ```
+
+2.  **Create Conda Environment:**
+    ```bash
+    conda create -n rag_server_env python=3.10
+    conda activate rag_server_env
+    ```
+
+3.  **Install PyTorch with CUDA (If using GPU):**
+    *   Go to [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/).
+    *   Select: Your OS, Conda, Python 3.10, desired CUDA version (≤ version shown by `nvidia-smi`).
+    *   **Copy and run the generated `conda install ...` command.** Example (check website for current command!):
+        ```bash
+        # Example for CUDA 12.1
+        conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+        ```
+
+4.  **Install Requirements:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+5.  **Hugging Face Authentication:** Choose **one** method:
+    *   **Method A (CLI Login):** Run this in your terminal and follow prompts (requires a HF account):
+        ```bash
+        huggingface-cli login
+        ```
+    *   **Method B (Environment/`.env`):**
+        *   Create a file named `.env` in the project root directory (`rag_llm_server_extended/`).
+        *   Get an access token (with read permissions) from [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+        *   Add the following line to your `.env` file, replacing the placeholder:
+          ```.env
+          HUGGING_FACE_HUB_TOKEN="hf_YourAccessTokenHere"
+          ```
+        *   **Important:** Ensure `.env` is listed in your `.gitignore` file to avoid committing your token.
+
+6.  **Configure Server (`.env` file):**
+    *   Edit the `.env` file (create if using Method B above).
+    *   Set `LLM_BACKEND_TYPE` (e.g., `local`, `ollama`). Default is `local`.
+    *   Set `DEFAULT_MODEL_NAME_OR_PATH` (e.g., `gpt2`, `meta-llama/Meta-Llama-3-8B-Instruct`). Default is `gpt2`.
+    *   If using `ollama` or `vllm`, uncomment and set the corresponding `_BASE_URL` variable.
+    *   *(Optional)* Set `HUGGING_FACE_HUB_TOKEN` if using Method B in Step 5.
+    *   *(Optional)* Override `SERVER_PORT` if needed.
+
+7.  **Run the Server:**
+    ```bash
+    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir core --reload-dir db --reload-dir services
+    ```
+    *   Use `--host 0.0.0.0` to access from other machines on your network, or `127.0.0.1` for local access only.
+    *   Adjust `--port` if needed.
+    *   `--reload` is useful for development. Remove for production.
+
+8.  **Verify:**
+    *   Check the terminal logs for successful startup, including the HF token check.
+    *   Open your browser to `http://localhost:8000/docs` (or the configured host/port). You should see the FastAPI documentation for all API endpoints (Documents, Chat Sessions, LLM Management, System Status).
+
+---
+
+**[c] Glossary of Terms**
+
+*   **API (Application Programming Interface):** A set of rules and protocols allowing different software applications to communicate with each other. In our case, the way clients interact with the server (e.g., upload documents, start chats).
+*   **ASGI (Asynchronous Server Gateway Interface):** A standard interface between async-capable Python web servers (like Uvicorn) and async web frameworks (like FastAPI).
+*   **Background Task:** A task (like document processing) initiated by an API request but executed by the server *after* the initial response has been sent to the client.
+*   **Backend (LLM):** Refers to the actual service or library handling LLM inference (e.g., local Transformers, Ollama API, vLLM API).
+*   **`bitsandbytes`:** A library enabling quantization (e.g., 8-bit, 4-bit) for deep learning models, primarily on NVIDIA GPUs, to reduce memory usage.
+*   **ChromaDB:** An open-source vector database used to store and efficiently search vector embeddings based on similarity.
+*   **Chunking:** The process of splitting large documents into smaller, overlapping text segments for embedding and retrieval.
+*   **Conda:** A cross-platform package and environment manager, particularly useful for managing complex dependencies like CUDA.
+*   **Context Window:** The maximum number of tokens an LLM can process as input at one time. Prompts exceeding this limit cause errors or degraded performance.
+*   **CUDA:** A parallel computing platform and programming model developed by NVIDIA for general computing on graphical processing units (GPUs).
+*   **`.env` file:** A text file used to store environment variables (like configuration settings or API keys) for an application, typically loaded on startup.
+*   **Executor Thread:** A separate thread (managed by `asyncio.run_in_executor`) used to run blocking, synchronous code (like local LLM inference) without halting the main asynchronous event loop.
+*   **FastAPI:** A modern, high-performance Python web framework for building APIs, built on Starlette and Pydantic, with native async support.
+*   **Hugging Face Hub:** A platform hosting a vast collection of pre-trained models, datasets, and tools for machine learning.
+*   **Hugging Face Token:** An access key used to authenticate requests to the Hugging Face Hub, required for downloading private/gated models or uploading.
+*   **Keyword Search:** Searching for documents based on the literal presence of specific words or phrases (implemented here using SQL `LIKE`).
+*   **LLM (Large Language Model):** A deep learning model trained on vast amounts of text data, capable of understanding and generating human-like text (e.g., GPT-2, Llama 3, Granite).
+*   **NVML (NVIDIA Management Library):** A C-based API for monitoring and managing NVIDIA GPU devices. `pynvml` is the Python binding.
+*   **Ollama:** A tool for easily running open-source LLMs locally via a simple API.
+*   **Pipeline (Hugging Face):** A high-level abstraction in the `transformers` library that simplifies common NLP tasks like text generation by bundling model loading, tokenization, inference, and post-processing.
+*   **Prompt Engineering:** The process of designing effective input prompts to guide an LLM towards generating the desired output.
+*   **`psutil`:** A cross-platform Python library for retrieving information on running processes and system utilization (CPU, memory, disks, network, sensors).
+*   **Pydantic:** A Python library for data validation and settings management using Python type hints. Used extensively by FastAPI.
+*   **Quantization:** The process of reducing the precision (number of bits) used to represent model weights and activations (e.g., from 32-bit float to 8-bit or 4-bit integer), significantly reducing memory usage and potentially increasing speed, sometimes at the cost of accuracy.
+*   **RAG (Retrieval-Augmented Generation):** An AI architecture that combines information retrieval (fetching relevant documents/data) with large language model generation to produce more knowledgeable, accurate, and context-aware responses.
+*   **Semantic Search:** Searching for documents based on meaning and conceptual similarity, typically using vector embeddings and nearest-neighbor search in a vector database.
+*   **Sentence Transformers:** A Python library built on `transformers` and PyTorch/TensorFlow, providing an easy way to compute dense vector embeddings (semantic representations) for sentences, paragraphs, and images.
+*   **SQLAlchemy (Core):** A Python SQL toolkit that provides tools for defining database schemas and constructing SQL queries programmatically, without necessarily using the full Object-Relational Mapper (ORM).
+*   **SQLite:** A C-language library implementing a self-contained, serverless, zero-configuration, transactional SQL database engine. Used here for storing metadata.
+*   **Tokenizer:** A component that converts raw text into a sequence of tokens (numbers) that an LLM can understand, and vice-versa.
+*   **Transformers (Library):** The core Hugging Face library providing access to thousands of pre-trained models (including LLMs) and tools for NLP tasks.
+*   **Uvicorn:** An ASGI server implementation used to run asynchronous Python web applications like those built with FastAPI or Starlette.
+*   **Vector Database:** A specialized database designed to efficiently store and query high-dimensional vectors based on similarity metrics (like cosine similarity or Euclidean distance). ChromaDB is an example.
+*   **Vector Embedding:** A dense numerical vector representation of a piece of data (like text) where similar items have vectors that are close together in the vector space.
+*   **vLLM:** An open-source library designed for fast and efficient LLM inference and serving, often providing an OpenAI-compatible API endpoint.
+*   **VRAM (Video RAM):** The dedicated memory present on a GPU, crucial for loading model weights and performing computations for deep learning tasks.
+
+---
+
+**[d] Future Features & Enhancements**
+
+This server is a great start! Here are potential features to make it more robust and capable:
+
+**RAG Pipeline Improvements:**
+
+1.  **Hybrid Search:** Combine keyword search (e.g., using SQLite FTS5 or a dedicated search index like MeiliSearch/Elasticsearch) with semantic search results using techniques like Reciprocal Rank Fusion (RRF) for better relevance.
+2.  **Re-ranking:** Use a smaller, faster cross-encoder model to re-rank the top-k documents retrieved by the initial search (semantic/hybrid) for improved final context relevance before summarization or generation.
+3.  **Query Transformation:** Implement techniques like HyDE (Hypothetical Document Embeddings) or multi-query generation to rephrase the user query for better retrieval results.
+4.  **Contextual Compression/Filtering:** Instead of simple truncation, filter retrieved chunks/summaries based on relevance to the query *before* adding them to the final prompt.
+5.  **Chat History Embedding:** Embed previous turns of the conversation and include relevant past interactions (found via semantic search on history) in the LLM context for longer-term memory.
+6.  **Metadata Filtering:** Allow filtering ChromaDB search results based on document metadata (e.g., source, date) during retrieval.
+
+**LLM & Generation Enhancements:**
+
+7.  **Streaming Responses:** Modify the chat endpoint and backend implementations to support streaming tokens back to the client as they are generated by the LLM for a more interactive feel. (Requires changes to API endpoint, service, and potentially backend classes).
+8.  **Dedicated Summarization Model:** Use a separate, smaller, potentially faster model specifically fine-tuned for summarization instead of using the main generation LLM (improves latency and avoids config conflicts).
+9.  **Fine-grained Parameter Control:** Allow passing specific generation parameters (like `stop` sequences) through the API to the backend's generate function.
+10. **Support for More Model Types (GGUF):** Add logic to `llm_service` and a specific backend (e.g., using `llama-cpp-python`) to load and interact with GGUF-formatted models, which are popular for running efficiently on CPU or GPU.
+11. **Better Prompt Template Management:** Use templating engines (like Jinja2) or configuration files to manage different prompt structures for various models or tasks.
+
+**API & Infrastructure:**
+
+12. **API Authentication & Authorization:** Implement user accounts and API key/OAuth2 authentication to secure endpoints.
+13. **User Management:** Allow different users to manage their own documents and sessions.
+14. **Asynchronous Document Processing Queue:** Replace FastAPI `BackgroundTasks` with a more robust task queue system (Celery, RQ, Arq) for better scalability, monitoring, and retries of document processing jobs.
+15. **Horizontal Scaling:** Design considerations for running multiple instances of the server (requires statelessness where possible or shared state management).
+16. **Input Validation:** More rigorous validation of inputs (e.g., checking document ID existence before linking to session).
+17. **Improved Logging & Monitoring:** Integrate structured logging and potentially monitoring tools (like Prometheus/Grafana) for better observability.
+18. **Automated Testing:** Implement comprehensive unit and integration tests.
+
+**Document Handling:**
+
+19. **Support More File Types:** Add extractors for other formats (e.g., `.pptx`, EPub, images via OCR).
+20. **Advanced Chunking Strategies:** Allow configuration of chunking parameters (size, overlap) per upload or globally; explore semantic chunking.
+21. **Document Metadata Extraction:** Automatically extract metadata (author, title, creation date) from documents during processing and store it for filtering.
+22. **Document Deletion:** Implement functionality to fully delete a document, including its chunks from SQLite and its vectors from ChromaDB.
+
+**User Experience:**
+
+23. **Web User Interface:** Build a front-end application (e.g., using React, Vue, Streamlit, Gradio) to interact with the server's API.
+24. **Session Tagging/Search:** Implement automatic tagging of sessions based on content and allow searching/filtering the session list.
+
+"OK. Next stage. How do I connect this RAG LLM server framework to an online LLM like Google Gemini 2.5?"
+
+Here's a thinking process for adding Google Gemini support:
+
+1.  **Understand the Goal:** The user wants to add Google Gemini (specifically mentioning 2.5, but let's aim for the general Gemini API) as another selectable backend, similar to how Ollama and vLLM were added.
+
+2.  **Identify Key Requirements for Gemini:**
+    *   **API Endpoint:** What's the URL for Gemini API calls? (Need to consult Google AI documentation). It's likely `https://generativelanguage.googleapis.com/...`
+    *   **Authentication:** How does Google authenticate API calls? (API Keys are standard for Google Cloud/AI services).
+    *   **Client Library:** Is there an official Python client library from Google? (`google-generativeai`). Using the official library is almost always better than raw HTTP requests.
+    *   **API Request/Response Format:** How is the prompt sent? What's the structure of the response? (Likely involves sending content/parts and receiving generated content). Need to map our internal prompt/config to Gemini's format.
+    *   **Model Names:** What are the identifiers for Gemini models (e.g., `gemini-1.5-pro-latest`, `gemini-1.5-flash-latest`)?
+
+3.  **Consult Google AI Documentation:**
+    *   Search for "Google AI Python SDK", "Gemini API Python", "Gemini API Authentication".
+    *   Find Quickstarts and API reference documentation.
+    *   Key findings:
+        *   Library: `google-generativeai`
+        *   Authentication: API Key, typically set via `GOOGLE_API_KEY` environment variable or passed during client initialization.
+        *   Client Initialization: `genai.configure(api_key=...)`, `model = genai.GenerativeModel(...)`
+        *   Generation Method: `model.generate_content(...)`
+        *   Request Format: Takes text prompt directly or structured `Content`/`Part` objects.
+        *   Response Format: A `GenerateContentResponse` object with `text` attribute (for simple cases) or `parts`.
+        *   Model Names: `gemini-1.5-pro-latest`, `gemini-1.5-flash-latest`, etc.
+        *   Configuration Mapping: Need to map `temperature`, `top_p`, `top_k`, `max_output_tokens` (equivalent to `max_new_tokens`) to `genai.GenerationConfig`.
+
+4.  **Plan the Implementation Steps:** Follow the pattern used for Ollama/vLLM:
+    *   **Configuration (`core/config.py`):** Add `LLM_BACKEND_TYPE="gemini"`, add `GOOGLE_API_KEY` setting.
+    *   **Install Library:** `pip install google-generativeai`.
+    *   **Backend Class (`services/llm_backends.py`):** Create `GeminiBackend(LLMBackendBase)`.
+        *   `__init__`: Takes `api_key` and `model_name`. Configures `genai` and initializes `genai.GenerativeModel`.
+        *   `generate`: Maps internal config to `genai.GenerationConfig`, calls `model.generate_content(prompt, generation_config=...)`, extracts text from the response. Needs to handle potential exceptions. Should be `async def` as `generate_content` is likely async (or check docs - *Update: `generate_content` is synchronous, so the backend `generate` can be sync, and `llm_service` will put it in executor*). *Correction: The `google-generativeai` library often provides both sync and async methods. Let's check if an async client/method exists. Okay, `generate_content_async` exists! Perfect. We'll make the method `async`.*
+        *   `get_status_dict`: Returns basic info (model name).
+        *   `unload`: No explicit unload needed for API client usually.
+    *   **Refactor `llm_service.py`:**
+        *   Add `"gemini"` to `LLMStatus` (or just handle it as an API type). *No, update the backend type Literal.*
+        *   Add `GeminiBackend` to imports.
+        *   Update `set_active_backend` to handle `backend_type == "gemini"`, retrieving the API key from settings and instantiating `GeminiBackend`.
+        *   Update `generate_text` to correctly identify `GeminiBackend` as an API backend (it already does if we inherit correctly and make `generate` async).
+    *   **Update API Models (`app/api/models/llm.py`):** Add `"gemini"` to the `Literal` type for `backend_type` in `ModelLoadRequest`.
+    *   **Update `requirements.txt`**.
+    *   **Update Documentation/`.env` example**.
+
+5.  **Write the Code (Iterative Refinement):**
+
+    *   **Config:** Add `GOOGLE_API_KEY` to `Settings`. Add `gemini` to `LLM_BACKEND_TYPE` Literal.
+    *   **Install:** Add `google-generativeai` to `requirements.txt`.
+    *   **Backend Class:**
+        *   Import `google.generativeai as genai`.
+        *   In `__init__`: Check if API key is provided. Call `genai.configure(api_key=...)`. Instantiate `genai.GenerativeModel(model_name=...)`. Store the model object.
+        *   In `generate`:
+            *   Make it `async def`.
+            *   Map config keys (`temperature`, `top_p`, `top_k`, `max_new_tokens`) to `genai.GenerationConfig` object keys (`temperature`, `top_p`, `top_k`, `max_output_tokens`). Handle potential missing keys gracefully using defaults.
+            *   Wrap the call in `try...except` to catch Google API errors (`google.api_core.exceptions`).
+            *   Call `await self.model.generate_content_async(prompt, generation_config=generation_config)`.
+            *   Extract `response.text`. Handle cases where `response.text` might not exist (check response structure/safety features).
+        *   `get_status_dict`: Return `{"active_model": self.model_name}`.
+    *   **LLM Service:**
+        *   Import `GeminiBackend`.
+        *   In `set_active_backend`: Add `elif backend_type == "gemini":`. Check `settings.GOOGLE_API_KEY`. Instantiate `GeminiBackend`. Set status to `READY`.
+        *   In `generate_text`: Ensure the `elif` includes `GeminiBackend` for direct `await`.
+    *   **API Models:** Add `gemini` to the `backend_type` Literal in `ModelLoadRequest`.
+    *   **Main (`app/main.py`):** Add check for `GOOGLE_API_KEY` in startup *if* Gemini is the *default* backend? Or just let `set_active_backend` handle the check when Gemini is requested. Let `set_active_backend` handle it to avoid forcing API key setup if the user only uses local models.
+
+6.  **Testing Plan:**
+    *   Set `GOOGLE_API_KEY` in `.env`.
+    *   Restart server.
+    *   Use `POST /load` with `backend_type="gemini"` and a valid Gemini model name (e.g., `gemini-1.5-flash-latest`).
+    *   Check status (`GET /status`).
+    *   Send a chat message. Verify logs show Gemini backend being called and check the response.
+    *   Test error handling (e.g., invalid API key, invalid model name).
+
+7.  **Review and Refine:** Check code for clarity, error handling, logging, and adherence to the established patterns. Ensure the API key isn't logged.
+
+Okay, connecting to managed online LLM services like Google's Gemini API follows the same multi-backend pattern we established. We'll add a new backend implementation for Gemini.
+
+**Prerequisites:**
+
+1.  **Google Cloud Project & API Key:**
+    *   You need a Google Cloud project with the "Generative Language API" (or Vertex AI API, depending on the specific Gemini model/endpoint you target) enabled.
+    *   You need an API Key associated with that project. You can create one in the Google Cloud Console under "APIs & Services" > "Credentials". **Treat this key like a password!**
+    *   Reference: [https://ai.google.dev/docs/setup](https://ai.google.dev/docs/setup)
+2.  **Google AI Python Library:** Install the official library.
+
+**Implementation Steps:**
+
+**1. Install Google AI Library**
+
+```bash
+pip install google-generativeai
+```
+
+**2. Update Configuration (`core/config.py`)**
+
+Add `"gemini"` to the backend type literal and add a setting for the API key.
+
+```python
+# core/config.py
+# ... (imports: Optional, List, Any, Literal) ...
+
+class Settings(BaseSettings):
+    # ... (General, DB, Embedding settings) ...
+
+    # --- LLM Settings ---
+    # Add 'gemini' to the allowed types
+    LLM_BACKEND_TYPE: Literal["local", "ollama", "vllm", "instructlab", "gemini"] = Field(
+        default="local",
+        description="The default LLM backend ('local', 'ollama', 'vllm', 'instructlab', 'gemini')."
+    )
+    # Base URLs (Gemini uses API Key, not base URL usually)
+    OLLAMA_BASE_URL: Optional[str] = Field(default="http://localhost:11434", ...)
+    VLLM_BASE_URL: Optional[str] = Field(default=None, ...)
+    INSTRUCTLAB_BASE_URL: Optional[str] = Field(default=None, ...)
+
+    # --- NEW: Google API Key ---
+    GOOGLE_API_KEY: Optional[str] = Field(
+        default=None,
+        description="API Key for Google AI (Gemini). Loaded from .env or environment."
+    )
+    # --------------------------
+
+    DEFAULT_MODEL_NAME_OR_PATH: str = Field(
+        default="gpt2",
+        description="Default model identifier (HF ID, path for 'local'; model name for API backends like 'gemini-1.5-flash-latest' for 'gemini')." # Updated example
+    )
+    # ... (Local settings, Generation parameters) ...
+
+    class Config:
+        env_file = '.env'
+        env_file_encoding = 'utf-8'
+        extra = 'ignore'
+
+settings = Settings()
+
+# ... (Ensure directories exist) ...
+# ... (Print config - maybe add check for GOOGLE_API_KEY if gemini is default?) ...
+if settings.LLM_BACKEND_TYPE == 'gemini' and not settings.GOOGLE_API_KEY:
+    print("WARNING: LLM_BACKEND_TYPE is 'gemini' but GOOGLE_API_KEY is not set!")
+# ...
+print(f"--------------------------")
+
+```
+
+**3. Create Gemini Backend (`services/llm_backends.py`)**
+
+Add a new class `GeminiBackend`.
+
+```python
+# services/llm_backends.py
+import logging
+import abc
+from typing import Dict, Any, Optional, AsyncGenerator
+
+import httpx
+from core.config import settings
+
+# --- ADD Google AI Imports ---
+try:
+    import google.generativeai as genai
+    google_ai_available = True
+except ImportError:
+    google_ai_available = False
+    genai = None # Define genai as None if import fails
+# --- END ADD ---
+
+
+logger = logging.getLogger(__name__)
+
+# --- Base Class (unchanged) ---
+# ... LLMBackendBase ...
+
+# --- Other Backends (unchanged) ---
+# ... LocalTransformersBackend ...
+# ... OllamaBackend ...
+# ... VLLMBackend ...
+# ... InstructLabBackend ...
+
+
+# --- NEW: Gemini Backend ---
+class GeminiBackend(LLMBackendBase):
+    def __init__(self, api_key: str, model_name: str):
+        if not google_ai_available or genai is None:
+             raise ImportError("Attempted to initialize GeminiBackend, but 'google-generativeai' library is not installed. Please run 'pip install google-generativeai'.")
+
+        self.model_name = model_name
+        self.api_key = api_key
+        try:
+            # Configure the API key globally for the library (common pattern)
+            genai.configure(api_key=self.api_key)
+            # Create the specific model instance
+            self.model = genai.GenerativeModel(model_name=self.model_name)
+            logger.info(f"GeminiBackend initialized: Model='{self.model_name}' configured.")
+        except Exception as e:
+            logger.error(f"Failed to configure Gemini or initialize model '{self.model_name}': {e}", exc_info=True)
+            raise ValueError(f"Gemini configuration/initialization failed: {e}") from e
+
+    async def generate(self, prompt: str, config: Dict[str, Any]) -> Optional[str]:
+        logger.info(f"Generating text via Gemini backend (model: {self.model_name})...")
+
+        # Map internal config keys to Gemini GenerationConfig keys
+        gemini_config = genai.types.GenerationConfig(
+            # candidate_count=1, # Default is 1
+            # stop_sequences=["\n###"], # Example stop sequence
+            max_output_tokens=config.get("max_new_tokens", settings.DEFAULT_LLM_MAX_NEW_TOKENS),
+            temperature=config.get("temperature", settings.DEFAULT_LLM_TEMPERATURE),
+            top_p=config.get("top_p", settings.DEFAULT_LLM_TOP_P),
+            top_k=config.get("top_k", settings.DEFAULT_LLM_TOP_K), # Note: top_k >= 1
+        )
+        # Ensure top_k is valid for Gemini (must be >= 1)
+        if gemini_config.top_k is not None and gemini_config.top_k < 1:
+            logger.warning(f"Gemini requires top_k >= 1. Received {gemini_config.top_k}, setting to 1.")
+            gemini_config.top_k = 1
+
+        logger.debug(f"Gemini GenerationConfig: {gemini_config}")
+
+        try:
+            # Use the asynchronous generation method
+            response = await self.model.generate_content_async(
+                contents=prompt, # Send the full prompt string
+                generation_config=gemini_config,
+                # safety_settings=... # Optional: configure safety settings
+            )
+
+            # Extract text, handling potential blocks or missing text
+            if response.text:
+                 generated_text = response.text
+                 logger.info("Gemini generation successful.")
+                 logger.debug(f"Gemini Response: {generated_text[:500]}...")
+                 return generated_text.strip()
+            else:
+                 # Log details if text is missing (e.g., blocked by safety filters)
+                 logger.warning(f"Gemini response did not contain text. Prompt feedback: {response.prompt_feedback}. Finish reason: {getattr(response.candidates[0], 'finish_reason', 'N/A')}")
+                 # Consider checking response.candidates[0].content.parts if text is missing
+                 return "[ERROR: Gemini response empty or blocked]"
+
+        except Exception as e:
+            # Catch potential google API errors or other issues
+            logger.error(f"Gemini generation failed unexpectedly: {e}", exc_info=True)
+            # Example specific error check:
+            # if isinstance(e, google.api_core.exceptions.PermissionDenied):
+            #     return "[ERROR: Gemini API key invalid or lacks permissions]"
+            return f"[ERROR: Gemini generation failed - {type(e).__name__}]"
+
+    def get_status_dict(self) -> Dict[str, Any]:
+         return {
+             "active_model": self.model_name,
+             # Can add more details if needed, e.g., check API reachability
+         }
+
+    async def unload(self):
+        # No explicit unload/cleanup needed for the genai library typically
+        logger.info("GeminiBackend unload called (no action needed).")
+        pass # Nothing specific to unload
+
+```
+*   Conditionally imports `google.generativeai`.
+*   `__init__`: Takes API key, model name. Calls `genai.configure` and creates `genai.GenerativeModel`. Raises `ImportError` if library missing, `ValueError` on config fail.
+*   `generate`: Maps our config to `genai.GenerationConfig`. Calls `model.generate_content_async`. Extracts `response.text`. Includes basic error handling and checks if the response was empty/blocked.
+*   `get_status_dict`: Returns model name.
+*   `unload`: Does nothing, as there's no persistent connection to close like `httpx`.
+
+**4. Update LLM Service (`services/llm_service.py`)**
+
+Add the `GeminiBackend` to the imports and the `set_active_backend` logic.
+
+```python
+# services/llm_service.py
+# ... (imports) ...
+from .llm_backends import (
+    LLMBackendBase, LocalTransformersBackend, OllamaBackend,
+    VLLMBackend, InstructLabBackend, GeminiBackend # <-- ADD GeminiBackend
+)
+
+# ... (LLMStatus, llm_state, helper functions, _unload_current_backend, _load_local_model_task) ...
+
+# --- Public Service Functions ---
+# ... (get_llm_status, update_llm_config - unchanged) ...
+
+# --- Generate Text (Ensure GeminiBackend is checked) ---
+async def generate_text(prompt: str) -> Optional[str]:
+    # ... (get backend, status check) ...
+    config = llm_state["config"]
+
+    try:
+        if isinstance(backend, LocalTransformersBackend):
+            # ... (run local in executor) ...
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, backend.generate, prompt, config)
+        # --- ADD GeminiBackend to the async call list ---
+        elif isinstance(backend, (OllamaBackend, VLLMBackend, InstructLabBackend, GeminiBackend)):
+            logger.info(f"Running API generation via {llm_state['backend_type']} backend...")
+            result = await backend.generate(prompt, config)
+        # --- END ADD ---
+        else:
+             logger.error(f"Unknown backend type {type(backend)} cannot generate.")
+             result = None
+        return result
+    except Exception as e:
+        # ... (error handling) ...
+        return None
+
+
+# --- Function to initiate backend loading/configuration ---
+async def set_active_backend(
+    backend_type: str,
+    model_name_or_path: str,
+    device: Optional[str] = None,
+    quantization: Optional[str] = None
+):
+    # ... (logging, unload previous backend) ...
+
+    # 2. Create and configure the new backend instance
+    new_backend: Optional[LLMBackendBase] = None
+    llm_state["status"] = LLMStatus.CONFIGURING # Default for API backends
+    llm_state["backend_type"] = backend_type
+    llm_state["active_model"] = model_name_or_path # Tentative
+    llm_state["last_error"] = None
+
+    try:
+        if backend_type == "local":
+            # ... (local backend loading logic - unchanged) ...
+            return # Return early for local background load
+
+        elif backend_type == "ollama":
+            # ... (ollama logic - unchanged) ...
+             if not settings.OLLAMA_BASE_URL: raise ValueError(...)
+             new_backend = OllamaBackend(settings.OLLAMA_BASE_URL, model_name_or_path)
+
+        elif backend_type == "vllm":
+             # ... (vllm logic - unchanged) ...
+              if not settings.VLLM_BASE_URL: raise ValueError(...)
+              new_backend = VLLMBackend(settings.VLLM_BASE_URL, model_name_or_path)
+
+        elif backend_type == "instructlab":
+            # ... (instructlab logic - unchanged) ...
+             if not settings.INSTRUCTLAB_BASE_URL: raise ValueError(...)
+             new_backend = InstructLabBackend(settings.INSTRUCTLAB_BASE_URL, model_name_or_path)
+
+        # --- ADD Gemini Backend Logic ---
+        elif backend_type == "gemini":
+             if not settings.GOOGLE_API_KEY:
+                 raise ValueError("GOOGLE_API_KEY not configured in settings/environment.")
+             # Initialization happens here, might raise error if API key invalid etc.
+             new_backend = GeminiBackend(settings.GOOGLE_API_KEY, model_name_or_path)
+        # --- END ADD ---
+
+        else:
+            raise ValueError(f"Unsupported LLM_BACKEND_TYPE: {backend_type}")
+
+        # --- Update state for successfully configured API backend ---
+        llm_state["backend_instance"] = new_backend
+        llm_state["active_model"] = model_name_or_path
+        llm_state["status"] = LLMStatus.READY # API backends are ready once instance created
+        logger.info(f"Backend '{backend_type}' configured and ready with model '{model_name_or_path}'.")
+
+    except Exception as e:
+        # ... (Error handling - unchanged) ...
+
+```
+*   Imports `GeminiBackend`.
+*   Adds check for `GeminiBackend` in `generate_text` to use `await`.
+*   Adds `elif backend_type == "gemini":` block in `set_active_backend` which checks for the API key and instantiates `GeminiBackend`.
+
+**5. Update API Model (`app/api/models/llm.py`)**
+
+Add `"gemini"` to the `Literal` type for `backend_type` in `ModelLoadRequest`.
+
+```python
+# app/api/models/llm.py
+# ... (imports: Literal) ...
+
+class ModelLoadRequest(BaseModel):
+    backend_type: Optional[Literal["local", "ollama", "vllm", "instructlab", "gemini"]] = Field(...) # Added "gemini"
+    # ... (rest of ModelLoadRequest) ...
+
+# ... (rest of the file) ...
+```
+
+**6. Update `requirements.txt`**
+
+Add the new library:
+```txt
+# requirements.txt
+# ... (other requirements) ...
+google-generativeai
+```
+Run `pip install -r requirements.txt` again.
+
+**7. Update `.env` Example**
+
+Add the `GOOGLE_API_KEY` variable:
+```.env
+# Server Configuration
+# LLM_BACKEND_TYPE=gemini # Example: Set default to Gemini
+DEFAULT_MODEL_NAME_OR_PATH=gemini-1.5-flash-latest # Example Gemini model
+
+# API Keys / URLs
+# GOOGLE_API_KEY="AIz...YourApiKeyHere" # Uncomment and set if using Gemini
+# OLLAMA_BASE_URL=http://localhost:11434
+# VLLM_BASE_URL=http://localhost:8000
+
+# Optional: Hugging Face Hub Token (for local backend downloads)
+# HUGGING_FACE_HUB_TOKEN="hf_YourAccessTokenHere"
+```
+
+**Testing:**
+
+1.  Add your Google API Key to your `.env` file or set it as an environment variable (`export GOOGLE_API_KEY=...`).
+2.  Restart the Uvicorn server.
+3.  Use `POST /api/v1/models/load` with the following body:
+    ```json
+    {
+      "backend_type": "gemini",
+      "model_name_or_path": "gemini-1.5-flash-latest" // Or gemini-1.5-pro-latest
+    }
+    ```
+4.  Check `GET /api/v1/models/status`. It should show `backend_type: "gemini"`, `active_model: "gemini-1.5-flash-latest"`, `status: "Ready"`.
+5.  Create a chat session and send a message.
+6.  Verify the logs show the `GeminiBackend` being used and check the response quality.
+
+You can now select Google Gemini as a backend for your RAG server!
+
+
