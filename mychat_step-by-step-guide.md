@@ -3,7 +3,7 @@
 > ### One Prompt Shall Rule Them All ###
 > Now we are going to start a new project built to connect a user to the functionality of the RAG LLM server we just finished. I want to start out with a basic Generative AI Chat web app built in React.js for cross browser desktop and mobile device deployment. We want to make it flexible so we can add features later with the ultimate goal a robust Chat and AI Agent application platform. We are going to presume the user knows HTML5, CSS, and JavaScript. They are beginner level React.js developers. Provide instruction and full installation of dependencies, node.js modules, libraries, etc. Use custom CSS for each component creating a modern generic user experience. Do not use any CSS frameworks because we want the developer to be able to modify the user interface elements for their own preferences.
 >
-> [Click here for the full prompt transcript with bug fixing](wechat/instructions/z4_the_complete_prompt_response_thread.md)
+> [Click here for the full prompt transcript with bug fixing](mychat/instructions/z4_the_complete_prompt_response_thread.md)
 
 ***
 
@@ -83,4 +83,4 @@
 
 ***   
 
-**[Setup 1: Environment Setup Quick Start Guide](wechat/instructions/setup_1_environment_quick_setup.md)**
+**[Setup 1: Environment Setup Quick Start Guide](mychat/instructions/setup_1_environment_quick_setup.md)**
