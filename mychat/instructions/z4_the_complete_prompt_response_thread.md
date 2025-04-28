@@ -3242,3 +3242,789 @@ The server can now store conversations. The next logical steps involve making th
 
 Which of these would you like to tackle next? Integrating the RAG step and a placeholder LLM call into the chat message endpoint seems like the most direct path towards a functional RAG chat.
 
+"I don't see the new section "Chat Sessions" in API docs (http://localhost:8000/docs). Did we add the code?"
+
+1.  **Identify the Problem:** The user reports that the "Chat Sessions" section, expected to be created by `app.include_router(sessions.router, ...)`, is not visible in the FastAPI Swagger UI (`/docs`).
+
+2.  **Recall the Steps:** Review the steps taken in the previous turn (Step 6):
+    *   Created `app/api/models/chat.py` (Models).
+    *   Created `app/api/endpoints/sessions.py` (Router and Endpoints).
+    *   **Modified `app/main.py` to include the `sessions.router`.**
+
+3.  **Hypothesize Potential Causes:**
+    *   **Code Not Saved:** The most common reason - the change in `app/main.py` might not have been saved before restarting the server.
+    *   **Incorrect Import:** The line `from app.api.endpoints import sessions` in `app/main.py` might have a typo or path issue.
+    *   **Router Not Included:** The line `app.include_router(sessions.router, ...)` might have been accidentally commented out, deleted, or placed incorrectly (e.g., inside the `if __name__ == "__main__":` block, although that's unlikely here).
+    *   **Server Not Restarted / Reload Error:** Uvicorn's `--reload` might have failed to pick up the change in `app/main.py` for some reason (less likely if other changes were picked up, but possible). A full manual restart might be needed.
+    *   **Error During Import:** An error *within* `app/api/endpoints/sessions.py` or its imports (`app/api/models/chat.py`) could prevent the `sessions` module from loading correctly, thus preventing the router from being included. The server startup logs should show such an error.
+    *   **FastAPI Caching (Browser):** Unlikely for endpoint listing, but sometimes browser cache can cause UI weirdness. A hard refresh (Ctrl+Shift+R or Cmd+Shift+R) is worth trying.
+    *   **Typo in Router Variable:** Maybe the variable name `router` inside `sessions.py` doesn't match the one used in `app.include_router(sessions.router, ...)`. (Checked the code provided, it uses `router` consistently).
+
+4.  **Prioritize Checks:**
+    *   **Check `app/main.py`:** Verify the `import` and `app.include_router` lines are present, correct, and not commented out. This is the most direct cause related to including the router.
+    *   **Check Server Startup Logs:** Look for *any* errors during startup, especially related to importing `sessions` or `chat` modules. This would indicate a problem within those files.
+    *   **Manual Server Restart:** Stop the `uvicorn` process completely (Ctrl+C) and restart it explicitly: `uvicorn app.main:app --reload --reload-dirs app --reload-dirs core --reload-dirs db --reload-dirs services`. This ensures a clean start.
+    *   **Hard Refresh Browser:** Clear cache for `/docs`.
+
+5.  **Formulate the Response:**
+    *   Acknowledge the user's observation.
+    *   Reassure them that the code *was* added in the previous step.
+    *   Guide them through the troubleshooting steps, starting with the most likely cause (`app/main.py` check).
+    *   Provide the relevant snippet from `app/main.py` again for easy comparison.
+    *   Instruct them to check server logs for import errors.
+    *   Suggest a manual restart and browser refresh.
+    *   Ask for feedback on what they find.
+  
+You are absolutely right to ask! My apologies. I provided the code, but I didn't explicitly point out *where* in `app/main.py` we added the lines to include the sessions router. It's easy to miss during multi-step processes.
+
+Let's double-check the crucial part in `app/main.py`. Please verify that you have these lines:
+
+1.  **The import near the top:**
+
+    ```python
+    # app/main.py
+    # ... other imports ...
+    from app.api.endpoints import documents
+    from app.api.endpoints import sessions # <--- MAKE SURE THIS IMPORT IS PRESENT
+    # ... other imports ...
+    ```
+
+2.  **The `app.include_router` call, placed *after* the `app = FastAPI(...)` definition and usually *after* the documents router:**
+
+    ```python
+    # --- Include API Routers ---
+    app.include_router(
+        documents.router,
+        prefix="/api/v1/documents",
+        tags=["Documents"]
+    )
+    # --- ADDED: Include sessions router ---
+    app.include_router(                  # <--- MAKE SURE THIS BLOCK IS PRESENT...
+        sessions.router,                 # <--- ...AND USES sessions.router...
+        prefix="/api/v1/sessions",       # <--- ...AND IS NOT COMMENTED OUT.
+        tags=["Chat Sessions"]
+    )
+    # --- END ADDED ---
+
+    # Placeholder for Future Routers
+    # ...
+    ```
+
+**Most common reasons for it not showing up:**
+
+1.  **File Not Saved:** The changes to `app/main.py` might not have been saved before restarting `uvicorn`.
+2.  **Restart/Reload Issue:** `uvicorn --reload` might not have detected the change correctly. Try stopping the server completely (Ctrl+C) and restarting it:
+    ```bash
+    uvicorn app.main:app --reload --reload-dirs app --reload-dirs core --reload-dirs db --reload-dirs services
+    ```
+3.  **Import Error:** Check the terminal output where `uvicorn` is running *very carefully* when it starts up. Is there *any* error message, perhaps related to importing `sessions` or something within `sessions.py` or `chat.py`? An error during the import of `app.api.endpoints.sessions` would prevent the router from being added.
+4.  **Typo:** A small typo in the import statement (`sessions` vs `session`) or the `app.include_router` call.
+
+Please double-check that the `import` line and the `app.include_router` block for `sessions.router` exist and are correctly spelled in your `app/main.py`, save the file, and restart the server. Then refresh the `/docs` page.
+
+Let me know if that makes the "Chat Sessions" section appear!
+
+all the Documents routes are displaying in the localhost:8000/docs. The Chat is not even after verifying. Here is the main.py code I am using:
+
+# main.py
+import uvicorn
+from fastapi import FastAPI
+import datetime
+import os
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Import routers
+from app.api.endpoints import documents
+from app.api.endpoints import sessions # <--- ADDED IMPORT
+
+from core.config import settings
+from db.database import connect_db, disconnect_db, create_metadata_tables, get_or_create_collections
+from services.embedding_service import get_embedding_model
+
+# --- Core Application Setup ---
+# Create the main FastAPI application instance
+app = FastAPI(
+    title=settings.APP_NAME,
+    description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
+    version="0.1.0",
+     # Add lifespan context manager for cleaner startup/shutdown with model loading
+    # lifespan=lifespan # We can implement this later if needed
+)
+
+app.include_router(
+    documents.router,
+    prefix="/api/v1/documents",
+    tags=["Documents"]
+)
+
+app.include_router(
+    sessions.router,
+    prefix="/api/v1/sessions",
+    tags=["Chat Sessions"] # New tag for organization
+)
+
+# --- Basic Root Endpoint ---
+@app.get("/")
+async def read_root():
+    """ Root endpoint providing basic server information. """
+    return {
+        "message": f"Welcome to the {settings.APP_NAME}!",
+        "status": "running",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+
+@app.on_event("startup")
+async def startup_event():
+    """Connect to database and pre-load models on server startup."""
+    print("Server starting up...")
+    await connect_db()
+    # --- ADDED: Pre-load embedding model ---
+    print("Pre-loading embedding model...")
+    try:
+        # This call will trigger the loading if not already loaded
+        get_embedding_model()
+        print("Embedding model loading initiated (check logs for completion).")
+    except Exception as e:
+        print(f"ERROR: Failed to pre-load embedding model during startup: {e}")
+        # Decide if this is fatal or if the server can run without embeddings initially
+    # --- END ADDED ---
+    print("Server startup complete.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Disconnect from database on server shutdown."""
+    print("Server shutting down...")
+    await disconnect_db()
+    print("Server shutdown complete.")
+
+# --- Placeholder for Future Routers ---
+# We will add routers for different functionalities (documents, models, sessions, system) later.
+# Example: from app.api.endpoints import documents
+#          app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"])
+
+# --- Running the Server (for direct execution) ---
+if __name__ == "__main__":
+    print(f"Starting server on http://{settings.SERVER_HOST}:{settings.SERVER_PORT}")
+    uvicorn.run(
+        "app.main:app",
+        host=settings.SERVER_HOST,
+        port=settings.SERVER_PORT,
+        reload=True,
+        reload_dirs=[
+            str(settings.BASE_DIR / 'app'),
+            str(settings.BASE_DIR / 'core'),
+            str(settings.BASE_DIR / 'db'),
+            str(settings.BASE_DIR / 'services')
+        ]
+    )
+
+The user confirms the code in `app/main.py` seems correct, including the import for `sessions` and the `app.include_router` call for the sessions router. However, the "Chat Sessions" section still doesn't appear in the FastAPI docs (`/docs`). The "Documents" section *does* appear.
+
+This suggests the issue isn't in `main.py` itself, but rather something is preventing the `sessions` module or the router within it from being loaded or registered correctly *before* FastAPI generates the OpenAPI schema used by `/docs`.
+
+Possible causes:
+1.  **Import Error within `app/api/endpoints/sessions.py`:** An error occurring *inside* the `sessions.py` file (or any file it imports, like `app/api/models/chat.py`) during the initial import phase would prevent the `router` object within `sessions.py` from being successfully created or imported by `main.py`. FastAPI would silently skip including the problematic router.
+2.  **Import Error within `app/api/models/chat.py`:** Similar to point 1, if there's an error in the Pydantic models file (`chat.py`), it would prevent `sessions.py` from importing it, causing the `sessions.py` import in `main.py` to fail.
+3.  **Circular Imports:** Although less likely with the current structure, a circular import involving `sessions.py` could cause issues.
+4.  **Syntax Error:** A simple syntax error in `sessions.py` or `chat.py`.
+5.  **File Naming/Path Issues:** Double-check that the files are named *exactly* `sessions.py` and `chat.py` and are in the correct directories (`app/api/endpoints/` and `app/api/models/` respectively). Case sensitivity matters on some systems. Also ensure the necessary `__init__.py` files exist in `app/`, `app/api/`, `app/api/endpoints/`, and `app/api/models/`.
+6.  **Uvicorn Reload Cache/State:** Sometimes, especially with complex errors or many restarts, the reloader might get into a weird state. A full stop (Ctrl+C) and restart is usually sufficient, but clearing Python `__pycache__` directories might occasionally help (though less likely to be the cause here).
+
+**Debugging Strategy:**
+
+1.  **Check Terminal Output Vigorously:** Stop the server. Clear the terminal. Start the server *without* `--reload` first to get cleaner output: `uvicorn app.main:app --host 0.0.0.0 --port 8000`. Examine *every single line* of output for *any* traceback or error message, especially those occurring *before* the "Uvicorn running on..." message. Errors during module loading are often printed here.
+2.  **Simplify `sessions.py` Temporarily:** Comment out *all* the code inside `app/api/endpoints/sessions.py` *except* for the basic router definition:
+    ```python
+    # app/api/endpoints/sessions.py
+    import logging
+    from fastapi import APIRouter
+
+    logger = logging.getLogger(__name__)
+    router = APIRouter()
+
+    # @router.get("/test") # Add a minimal test endpoint
+    # async def test_sessions():
+    #     return {"message": "Sessions router is working!"}
+
+    # Comment out all other code in this file temporarily
+    # ... (imports for models, db, etc.) ...
+    # ... (helper functions) ...
+    # ... (all endpoint definitions: create_session, list_sessions, etc.) ...
+    ```
+    Save this simplified file. Restart the server (`uvicorn app.main:app --reload ...`). Check `/docs` again.
+    *   If "Chat Sessions" *now* appears (possibly with just the "/test" endpoint if you uncommented it), the problem lies within the commented-out code in `sessions.py` or its imports (like `chat.py`).
+    *   If it *still* doesn't appear, the problem is more fundamental, perhaps related to file paths, `__init__.py` files, or a deeper import issue elsewhere.
+3.  **Simplify `chat.py`:** If step 2 points to an issue in the commented code, the next step is to check the imported models. Temporarily simplify `app/api/models/chat.py` as well, leaving only basic Pydantic models or even just import statements, and see if that allows `sessions.py` (with its original code restored partially or fully) to load.
+4.  **Check `__init__.py` files:** Ensure these empty files exist:
+    *   `app/__init__.py`
+    *   `app/api/__init__.py`
+    *   `app/api/endpoints/__init__.py`
+    *   `app/api/models/__init__.py`
+    *   `core/__init__.py`
+    *   `db/__init__.py`
+    *   `services/__init__.py`
+
+Let's start with step 1 (checking terminal output carefully) and step 2 (simplifying `sessions.py`).
+
+Okay, that's puzzling. The code in `main.py` looks perfectly correct for including the router. If "Documents" shows up but "Chat Sessions" doesn't, despite the `app.include_router(sessions.router, ...)` line being present and uncommented, it strongly suggests that the `sessions` module itself is failing to load correctly when FastAPI inspects the application, even if `main.py` doesn't crash outright.
+
+Here’s a breakdown of likely causes and how to debug:
+
+1.  **Error Inside `sessions.py` or its Imports:** The most common reason. An error (SyntaxError, NameError, ImportError, etc.) *inside* `app/api/endpoints/sessions.py` or *inside* `app/api/models/chat.py` (which `sessions.py` imports) could prevent the `router = APIRouter()` line in `sessions.py` from executing successfully or prevent the `sessions` module from being fully imported by `main.py`. FastAPI would then skip including the router it couldn't properly load.
+
+    *   **Action:** Stop the server (Ctrl+C). Restart it using `uvicorn app.main:app` (without `--reload` for cleaner output) and **carefully examine every line of the terminal output** from the very beginning. Look for *any* traceback or error message, even if the server eventually says it's running. Errors happening during module import time might appear before the "Uvicorn running..." message. Pay close attention to errors mentioning `sessions.py` or `chat.py`.
+
+2.  **File Naming / Path Mismatch:** Double-check:
+    *   The file is exactly `app/api/endpoints/sessions.py` (lowercase `s`).
+    *   The models file is exactly `app/api/models/chat.py`.
+    *   All necessary `__init__.py` files exist in the directories (`app/`, `app/api/`, `app/api/endpoints/`, `app/api/models/`). These empty files are required for Python to treat directories as packages.
+
+3.  **Circular Import:** Less likely here, but possible if you added imports between modules in a circular way.
+
+**Let's Try Simplifying:**
+
+To isolate the problem, let's temporarily simplify `app/api/endpoints/sessions.py`. Replace its entire content with just this:
+
+```python
+# app/api/endpoints/sessions.py
+
+import logging
+from fastapi import APIRouter
+
+logger = logging.getLogger(__name__)
+
+# Create the router instance FIRST
+router = APIRouter()
+
+# Define a minimal test endpoint
+@router.get("/ping", tags=["Chat Sessions"]) # Add the tag here too
+async def ping_sessions():
+    """A simple endpoint to check if the sessions router is loaded."""
+    return {"message": "Sessions router is active!"}
+
+print("--- Sessions Router Loaded ---") # Add a print statement
+
+# Temporarily comment out ALL original code below this line in sessions.py
+# import uuid
+# import logging
+# ... all other imports ...
+# ... all helper functions (get_session_or_404) ...
+# ... all original endpoint definitions (@router.post("/"), @router.get("/"), etc.) ...
+```
+
+**Steps:**
+
+1.  Replace the content of `app/api/endpoints/sessions.py` with the simplified code above.
+2.  Save the file.
+3.  Stop the uvicorn server if it's running (Ctrl+C).
+4.  Restart the server: `uvicorn app.main:app --reload --reload-dirs app --reload-dirs core --reload-dirs db --reload-dirs services`
+5.  Look closely at the terminal output. Do you see the message `--- Sessions Router Loaded ---`?
+6.  Refresh the `/docs` page (`http://localhost:8000/docs`).
+
+**Expected Outcome:**
+
+*   **If "Chat Sessions" (with just the `/ping` endpoint) now appears in `/docs`:** This confirms the problem lies within the code you commented out in `sessions.py` or the files it was importing (most likely `app/api/models/chat.py`). You can then progressively uncomment sections of the original `sessions.py` and its imports, restarting the server each time, until the `/docs` page breaks again. This will pinpoint the problematic code block or import. Start by uncommenting the imports, then the helper function, then one endpoint at a time. Pay close attention to the `chat.py` import and the model usage.
+*   **If "Chat Sessions" *still* does not appear:** This suggests a more fundamental issue, like the file path/name being wrong, a missing `__init__.py` file somewhere in the `app/api/` path, or potentially a cached state issue (try deleting `__pycache__` folders within your project and `venv`). But the most likely cause remains an error preventing the module load, even with the simplified code. Re-check the terminal output *very* carefully for any hint of an error during startup.
+
+Let me know the results of trying this simplified `sessions.py`.
+
+Here is the log. The message Sessions Router Loaded did not display:
+
+(cuda_env) ken@ken-Precision-7680:~/Documents/gestalt/rag_llm_server$ uvicorn app.main:app --reload --reload-dir app --reload-dir core --reload-dir db --reload-dir services
+INFO:     Will watch for changes in these directories: ['/home/ken/Documents/gestalt/rag_llm_server/app', '/home/ken/Documents/gestalt/rag_llm_server/core', '/home/ken/Documents/gestalt/rag_llm_server/db', '/home/ken/Documents/gestalt/rag_llm_server/services']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [312291] using WatchFiles
+--- Configuration Loaded ---
+SQLite DB URL: sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server/data/rag_server.db
+ChromaDB Path: /home/ken/Documents/gestalt/rag_llm_server/data/chroma_db
+Upload Dir: /tmp/rag_server_uploads
+--------------------------
+ChromaDB persistent client initialized. Path: /home/ken/Documents/gestalt/rag_llm_server/data/chroma_db
+/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/pydantic/_internal/_config.py:345: UserWarning: Valid config keys have changed in V2:
+* 'allow_population_by_field_name' has been renamed to 'populate_by_name'
+* 'orm_mode' has been renamed to 'from_attributes'
+  warnings.warn(message, UserWarning)
+Initializing database schema...
+Attempting to create tables in database: rag_server.db
+Tables created successfully (if they didn't exist).
+Initializing ChromaDB collections...
+ChromaDB document collection 'rag_documents' ensured (metric: cosine).
+ChromaDB session collection 'chat_sessions' ensured (metric: cosine).
+Initialization complete.
+INFO:     Started server process [312293]
+INFO:     Waiting for application startup.
+Server starting up...
+INFO:databases:Connected to database sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server/data/rag_server.db
+Database connection established.
+Server startup complete.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:38844 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38844 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38844 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38844 - "GET /openapi.json HTTP/1.1" 200 OK
+
+The user confirmed that:
+1.  The `main.py` code includes the import `from app.api.endpoints import sessions`.
+2.  The `main.py` code includes the line `app.include_router(sessions.router, ...)`.
+3.  The "Documents" section *is* appearing in the `/docs`.
+4.  The "Chat Sessions" section is *not* appearing in `/docs`.
+5.  They replaced the content of `app/api/endpoints/sessions.py` with the simplified version containing only `router = APIRouter()` and `@router.get("/ping")` and the print statement `print("--- Sessions Router Loaded ---")`.
+6.  They restarted the server.
+7.  The terminal output shows no explicit Python traceback errors during startup (though there's a Pydantic V2 warning, which shouldn't break things).
+8.  Critically, the log output **does not contain** the line `--- Sessions Router Loaded ---`.
+
+This last point is the key. If the print statement *inside* `sessions.py` isn't executing, it means the Python interpreter isn't even reaching that point when `main.py` tries to `from app.api.endpoints import sessions`.
+
+This strongly suggests the problem isn't *inside* the simplified `sessions.py`, but rather something preventing the module itself from being imported/found correctly by `main.py`.
+
+Possible causes now narrow down significantly:
+
+1.  **Incorrect File Path/Name:** Despite prior checks, this is still a possibility. Is the file *exactly* `app/api/endpoints/sessions.py`? Is there any typo? Case sensitivity matters on Linux.
+2.  **Missing `__init__.py`:** Are there definitely `__init__.py` files (even if empty) in `app/`, `app/api/`, and `app/api/endpoints/`? The absence of any one of these along the path would prevent Python from treating the directories as packages, and the import `from app.api.endpoints import sessions` would fail silently in some contexts or raise an ImportError that might be getting suppressed or missed.
+3.  **Python Path Issue (`sys.path`):** The `sys.path` modification in `main.py` looks standard, but perhaps there's an edge case depending on *how* the `uvicorn` command is being run relative to the project structure. Running `uvicorn app.main:app` *from the project root* (`rag_llm_server/`) is usually the correct way. If run from within `app/`, the relative paths might break.
+4.  **Environment/Cache Issue:** Less likely, but sometimes stale `.pyc` files can cause problems. Deleting all `__pycache__` directories within the project and the virtual environment could help.
+5.  **Uvicorn/FastAPI Bug (Very Unlikely):** Extremely unlikely with standard usage.
+
+**Debugging Strategy:**
+
+1.  **Verify File Structure:** Ask the user to list the directory structure, specifically confirming the paths and `__init__.py` files:
+    ```bash
+    ls -R app/api/
+    ```
+2.  **Explicit Import Check:** Add an explicit check in `main.py` *immediately* after the import attempt to see if the module object exists.
+
+    ```python
+    # main.py
+    # ...
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    print(f"Project root added to sys.path: {project_root}")
+    print(f"Current sys.path: {sys.path}") # Add this for debugging
+
+    # Import routers
+    print("Attempting to import documents...")
+    try:
+        from app.api.endpoints import documents
+        print("Successfully imported documents.")
+        print(f"documents module: {documents}")
+        print(f"documents.router object: {hasattr(documents, 'router')}")
+    except Exception as e:
+        print(f"FAILED to import documents: {e}")
+
+    print("Attempting to import sessions...")
+    try:
+        from app.api.endpoints import sessions
+        print("Successfully imported sessions.") # <-- Will this print?
+        print(f"sessions module: {sessions}") # <-- What does this show?
+        print(f"sessions.router object exists: {hasattr(sessions, 'router')}") # <-- True or False?
+    except ImportError as e:
+        print(f"FAILED to import sessions: {e}") # <-- Did we get an ImportError?
+        sessions = None # Ensure sessions is None if import fails
+    except Exception as e:
+        print(f"FAILED to import sessions with other error: {e}")
+        sessions = None
+
+    # ... rest of imports (settings, db, etc.)
+
+    # --- Core Application Setup ---
+    app = FastAPI(...)
+
+    # Include document router (assuming it works)
+    if 'documents' in locals() and documents and hasattr(documents, 'router'):
+        print("Including documents router...")
+        app.include_router(
+            documents.router,
+            prefix="/api/v1/documents",
+            tags=["Documents"]
+        )
+    else:
+        print("Skipping documents router inclusion (module or router not found).")
+
+
+    # Include sessions router only if successfully imported AND has a router attribute
+    if sessions and hasattr(sessions, 'router'): # Check if sessions module was loaded and has the router
+        print("Including sessions router...")
+        app.include_router(
+            sessions.router,
+            prefix="/api/v1/sessions",
+            tags=["Chat Sessions"]
+        )
+    else:
+        print("Skipping sessions router inclusion (module or router not found).") # <-- Expecting this msg?
+
+
+    # ... rest of main.py ...
+    ```
+3.  **Check `__init__.py` files:** Reiterate the need for them.
+
+Let's start with asking for the directory structure and suggesting the explicit import check in `main.py`.
+
+Okay, this is really strange. The fact that the `print("--- Sessions Router Loaded ---")` line *inside* the simplified `app/api/endpoints/sessions.py` is not showing up in your log means that the Python interpreter is not even executing that file when `main.py` tries to import it. Yet, there's no `ImportError` crashing the server in the log you provided.
+
+This points away from errors *inside* `sessions.py` (since we simplified it drastically) and towards problems with module discovery or the import mechanism itself.
+
+Let's try these steps:
+
+1.  **Verify Directory Structure and `__init__.py` Files:**
+    This is critical for Python's packaging system. Please run this command from your project root directory (`rag_llm_server/`) and show me the output:
+    ```bash
+    ls -R app/api/
+    ```
+    We need to confirm you have:
+    *   `app/api/__init__.py` (can be empty)
+    *   `app/api/endpoints/__init__.py` (can be empty)
+    *   `app/api/endpoints/documents.py`
+    *   `app/api/endpoints/sessions.py` (the simplified one)
+    *   `app/api/models/__init__.py` (can be empty)
+    *   `app/api/models/chat.py` (the original one is fine for now)
+
+2.  **Add Explicit Import Checks in `main.py`:**
+    Let's modify `main.py` to add print statements *immediately* around the import and the `include_router` call to see exactly what's happening. Replace the import section and router inclusion section in your `app/main.py` with this diagnostic version:
+
+    ```python
+    # app/main.py
+    import uvicorn
+    from fastapi import FastAPI
+    import datetime
+    import sys # Make sure sys is imported
+    import os
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    print(f"Project root added to sys.path: {project_root}")
+    # print(f"Current sys.path: {sys.path}") # Optional: Uncomment for more detail
+
+    # --- Explicit Router Imports with Diagnostics ---
+    print("-" * 20)
+    print("Attempting to import 'documents' endpoint module...")
+    try:
+        from app.api.endpoints import documents
+        print("SUCCESS: Imported 'documents' module.")
+        print(f"  -> Type: {type(documents)}")
+        print(f"  -> Has 'router' attribute: {hasattr(documents, 'router')}")
+    except ImportError as e:
+        print(f"FAILED to import 'documents': {e}")
+        documents = None # Ensure variable exists but is None
+    except Exception as e:
+        print(f"FAILED to import 'documents' with unexpected error: {e}")
+        documents = None
+
+    print("-" * 20)
+    print("Attempting to import 'sessions' endpoint module...")
+    try:
+        from app.api.endpoints import sessions
+        print("SUCCESS: Imported 'sessions' module.") # <<< **** WATCH FOR THIS ****
+        print(f"  -> Type: {type(sessions)}")
+        print(f"  -> Has 'router' attribute: {hasattr(sessions, 'router')}") # <<< **** AND THIS ****
+    except ImportError as e:
+        print(f"FAILED to import 'sessions': {e}") # <<< **** OR THIS ****
+        sessions = None
+    except Exception as e:
+        print(f"FAILED to import 'sessions' with unexpected error: {e}")
+        sessions = None
+    print("-" * 20)
+    # --- End Explicit Router Imports ---
+
+
+    # Continue with other imports
+    from core.config import settings
+    from db.database import connect_db, disconnect_db, create_metadata_tables, get_or_create_collections
+    from services.embedding_service import get_embedding_model
+
+    # --- Core Application Setup ---
+    print("Creating FastAPI app instance...")
+    app = FastAPI(
+        title=settings.APP_NAME,
+        description="API server for managing RAG documents, interacting with LLMs, and managing chat sessions.",
+        version="0.1.0",
+    )
+    print("FastAPI app instance created.")
+
+    # --- Include Routers with Diagnostics ---
+    print("-" * 20)
+    if documents and hasattr(documents, 'router'):
+        print("Including 'documents' router...")
+        app.include_router(
+            documents.router,
+            prefix="/api/v1/documents",
+            tags=["Documents"]
+        )
+        print("SUCCESS: Included 'documents' router.")
+    else:
+        print("SKIPPING 'documents' router inclusion (module or router attribute not found).")
+
+    print("-" * 20)
+    if sessions and hasattr(sessions, 'router'): # Check module and attribute exist
+        print("Including 'sessions' router...") # <<< **** WATCH FOR THIS ****
+        app.include_router(
+            sessions.router,
+            prefix="/api/v1/sessions",
+            tags=["Chat Sessions"]
+        )
+        print("SUCCESS: Included 'sessions' router.")
+    else:
+        print("SKIPPING 'sessions' router inclusion (module or router attribute not found).") # <<< **** OR THIS ****
+    print("-" * 20)
+    # --- End Include Routers ---
+
+
+    # --- Basic Root Endpoint ---
+    @app.get("/")
+    async def read_root():
+        """ Root endpoint providing basic server information. """
+        return {
+            "message": f"Welcome to the {settings.APP_NAME}!",
+            "status": "running",
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+
+    # --- Event Handlers ---
+    @app.on_event("startup")
+    async def startup_event():
+        print("--> Event: startup")
+        await connect_db()
+        print("--> Pre-loading embedding model...")
+        try:
+            get_embedding_model()
+            print("--> Embedding model loading initiated.")
+        except Exception as e:
+            print(f"--> ERROR: Failed to pre-load embedding model: {e}")
+        print("--> Event: startup complete.")
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        print("--> Event: shutdown")
+        await disconnect_db()
+        print("--> Event: shutdown complete.")
+
+
+    # --- Running the Server ---
+    if __name__ == "__main__":
+        print("Starting server via __main__ block...")
+        uvicorn.run(
+            "app.main:app",
+            host=settings.SERVER_HOST,
+            port=settings.SERVER_PORT,
+            reload=True,
+            reload_dirs=[
+                str(settings.BASE_DIR / 'app'),
+                str(settings.BASE_DIR / 'core'),
+                str(settings.BASE_DIR / 'db'),
+                str(settings.BASE_DIR / 'services')
+            ]
+        )
+
+    print("--- End of main.py ---") # Should not be reached when run with uvicorn normally
+
+    ```
+
+3.  **Run and Analyze Output:**
+    *   Save the modified `app/main.py`.
+    *   Keep the **simplified** `app/api/endpoints/sessions.py` for now.
+    *   Stop uvicorn (Ctrl+C).
+    *   Restart: `uvicorn app.main:app --reload --reload-dir app --reload-dir core --reload-dir db --reload-dir services`
+    *   **Very carefully** examine the terminal output again. Look for the diagnostic print statements we added:
+        *   Does it say "SUCCESS: Imported 'sessions' module."?
+        *   Does it say "Has 'router' attribute: True" for sessions?
+        *   Does it say "FAILED to import 'sessions'..."? If so, what is the error?
+        *   Does it say "Including 'sessions' router..."?
+        *   Does it say "SKIPPING 'sessions' router inclusion..."?
+
+This detailed logging in `main.py` should give us a much clearer picture of whether the `sessions` module is being found and imported correctly and whether the `router` object is present within it *from main.py's perspective*.
+
+Share the output of the `ls -R app/api/` command and the new terminal log from uvicorn after making these changes.
+
+(cuda_env) ken@ken-Precision-7680:~/Documents/gestalt/rag_llm_server$ uvicorn app.main:app --reload --reload-dir app --reload-dir core --reload-dir db --reload-dir services
+INFO:     Will watch for changes in these directories: ['/home/ken/Documents/gestalt/rag_llm_server/app', '/home/ken/Documents/gestalt/rag_llm_server/core', '/home/ken/Documents/gestalt/rag_llm_server/db', '/home/ken/Documents/gestalt/rag_llm_server/services']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [312662] using WatchFiles
+--- Configuration Loaded ---
+SQLite DB URL: sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server/data/rag_server.db
+ChromaDB Path: /home/ken/Documents/gestalt/rag_llm_server/data/chroma_db
+Upload Dir: /tmp/rag_server_uploads
+--------------------------
+ChromaDB persistent client initialized. Path: /home/ken/Documents/gestalt/rag_llm_server/data/chroma_db
+/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/pydantic/_internal/_config.py:345: UserWarning: Valid config keys have changed in V2:
+* 'allow_population_by_field_name' has been renamed to 'populate_by_name'
+* 'orm_mode' has been renamed to 'from_attributes'
+  warnings.warn(message, UserWarning)
+Initializing database schema...
+Attempting to create tables in database: rag_server.db
+Tables created successfully (if they didn't exist).
+Initializing ChromaDB collections...
+ChromaDB document collection 'rag_documents' ensured (metric: cosine).
+ChromaDB session collection 'chat_sessions' ensured (metric: cosine).
+Initialization complete.
+INFO:     Started server process [312664]
+INFO:     Waiting for application startup.
+Server starting up...
+INFO:databases:Connected to database sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server/data/rag_server.db
+Database connection established.
+Server startup complete.
+INFO:     Application startup complete.
+
+(cuda_env) ken@ken-Precision-7680:~/Documents/gestalt/rag_llm_server$ ls -R app/api
+app/api:
+endpoints  models
+
+app/api/endpoints:
+documents.py  __pycache__  sessions.py
+
+app/api/endpoints/__pycache__:
+documents.cpython-310.pyc
+
+app/api/models:
+chat.py
+
+
+The user provided the output of the `uvicorn` command again and the `ls -R app/api` command.
+
+**Analysis of `ls -R` output:**
+- `app/api/endpoints/__init__.py` is **MISSING**.
+- `app/api/models/__init__.py` is **MISSING**.
+- `app/api/__init__.py` is **MISSING**.
+
+These missing `__init__.py` files are the most likely culprits preventing Python from correctly recognizing `app.api`, `app.api.endpoints`, and `app.api.models` as packages. Without these, the import `from app.api.endpoints import sessions` might silently fail or behave unexpectedly in some environments or depending on how the execution path is set up, even if `main.py` itself runs. While sometimes Python 3 can work without `__init__.py` (namespace packages), it's not reliable, especially in nested structures, and standard practice is to include them. FastAPI/Uvicorn likely relies on the standard package structure.
+
+**Analysis of `uvicorn` output:**
+- The detailed diagnostic print statements added to `main.py` (like "Attempting to import 'sessions' endpoint module...") are **NOT** appearing in the log.
+- This confirms that the `main.py` file being executed by `uvicorn` is **NOT** the modified one containing the diagnostic prints.
+
+**Hypotheses:**
+1.  **Incorrect File Saved:** The user modified `main.py` but saved it incorrectly (e.g., saved to a different location, or the save failed).
+2.  **`uvicorn` Not Reloading Correctly:** Although unlikely given the logs, maybe `--reload` isn't picking up the `main.py` change.
+3.  **Execution Path Issue:** Uvicorn might be loading an older version of `main.py` from somewhere else (very unlikely unless the project structure is highly unusual or there are multiple copies).
+4.  **Missing `__init__.py` Files (Highly Likely):** Even if the diagnostic `main.py` were running, the missing `__init__.py` files would likely break the imports.
+
+**Plan:**
+1.  Address the missing `__init__.py` files. This is fundamental Python packaging.
+2.  Instruct the user to *ensure* the modified `main.py` with diagnostic prints is saved in the correct location (`app/main.py`).
+3.  Instruct the user to restart `uvicorn` *without* `--reload` first to get a clean run with the potentially fixed structure and the diagnostic `main.py`.
+4.  Analyze the output of that clean run. It *should* now show the diagnostic prints. If it fails on the `sessions` import, the missing `__init__.py` files were the cause. If it succeeds, then the previous issue might have been the file save or reload.
+
+Okay, thank you for providing the `ls` output and the logs.
+
+**Diagnosis:**
+
+1.  **Missing `__init__.py` Files:** The `ls -R app/api` output clearly shows that you are **missing** the necessary `__init__.py` files in your `app/api/`, `app/api/endpoints/`, and `app/api/models/` directories. These files (even if empty) are essential for Python to recognize these directories as packages, allowing imports like `from app.api.endpoints import sessions` to work reliably. This is almost certainly the primary reason the `sessions` router isn't loading.
+
+2.  **Diagnostic Prints Not Showing:** The terminal output from `uvicorn` **does not contain the diagnostic print statements** we added to `main.py` (like "Attempting to import 'sessions' endpoint module..."). This indicates that the `main.py` file you edited and saved with those print statements was **not the one being executed** by `uvicorn`. This could be due to:
+    *   The file not being saved correctly in `app/main.py`.
+    *   The reloader somehow not picking up the change to `main.py` itself (less likely, but possible).
+
+**Solution:**
+
+Let's fix both issues:
+
+1.  **Create the Missing `__init__.py` Files:**
+    Go into your project's `app/api/`, `app/api/endpoints/`, and `app/api/models/` directories and create an empty file named `__init__.py` in each one. You can do this from the project root (`rag_llm_server/`) using these commands:
+    ```bash
+    touch app/api/__init__.py
+    touch app/api/endpoints/__init__.py
+    touch app/api/models/__init__.py
+    ```
+    After running these, your `ls -R app/api` output should look like this:
+    ```
+    app/api:
+    endpoints  __init__.py  models # <-- __init__.py added
+
+    app/api/endpoints:
+    documents.py  __init__.py  __pycache__  sessions.py # <-- __init__.py added
+
+    app/api/endpoints/__pycache__:
+    documents.cpython-310.pyc
+
+    app/api/models:
+     __init__.py chat.py # <-- __init__.py added
+    ```
+
+2.  **Ensure Correct `main.py` is Saved:**
+    *   Go back to your editor and open `app/main.py`.
+    *   Make **absolutely sure** it contains the diagnostic `print` statements we added in the previous step (around the imports and the `app.include_router` calls).
+    *   **Save the file** explicitly.
+
+3.  **Restart Uvicorn (Clean Start):**
+    *   Stop the running `uvicorn` server (Ctrl+C).
+    *   **Important:** Delete the `__pycache__` directories to ensure Python doesn't use stale compiled files. From the project root:
+        ```bash
+        find . -type d -name "__pycache__" -exec rm -r {} +
+        ```
+    *   Restart the server *without* reload first, to get a clean log:
+        ```bash
+        uvicorn app.main:app --host 0.0.0.0 --port 8000
+        ```
+        (We use `0.0.0.0` here just to match the previous startup, though `127.0.0.1` is also fine for local testing).
+
+4.  **Analyze the New Log:**
+    Now, carefully examine the terminal output from this clean start. You **should** see:
+    *   The diagnostic prints from `main.py` ("Attempting to import...", "Including router...").
+    *   Crucially, look for the lines related to importing and including the `sessions` module. Does it succeed or fail? Does it skip inclusion?
+    *   You should *also* now see the `print("--- Sessions Router Loaded ---")` message from the simplified `sessions.py` if the import is successful.
+
+Please perform these steps and share the complete terminal output from the clean `uvicorn app.main:app --host 0.0.0.0 --port 8000` run. This should resolve the issue or give us the exact error message if something is still wrong.
+
+(cuda_env) ken@ken-Precision-7680:~/Documents/gestalt/rag_llm_server$ find . -type d -name "__pycache__" -exec rm -r {} +
+(cuda_env) ken@ken-Precision-7680:~/Documents/gestalt/rag_llm_server$ uvicorn app.main:app --host 0.0.0.0 --port 8000
+--- Configuration Loaded ---
+SQLite DB URL: sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server/data/rag_server.db
+ChromaDB Path: /home/ken/Documents/gestalt/rag_llm_server/data/chroma_db
+Upload Dir: /tmp/rag_server_uploads
+--------------------------
+ChromaDB persistent client initialized. Path: /home/ken/Documents/gestalt/rag_llm_server/data/chroma_db
+/home/ken/miniconda3/envs/cuda_env/lib/python3.10/site-packages/pydantic/_internal/_config.py:345: UserWarning: Valid config keys have changed in V2:
+* 'allow_population_by_field_name' has been renamed to 'populate_by_name'
+* 'orm_mode' has been renamed to 'from_attributes'
+  warnings.warn(message, UserWarning)
+Initializing database schema...
+Attempting to create tables in database: rag_server.db
+Tables created successfully (if they didn't exist).
+Initializing ChromaDB collections...
+ChromaDB document collection 'rag_documents' ensured (metric: cosine).
+ChromaDB session collection 'chat_sessions' ensured (metric: cosine).
+Initialization complete.
+INFO:     Started server process [313876]
+INFO:     Waiting for application startup.
+Server starting up...
+INFO:databases:Connected to database sqlite+aiosqlite:////home/ken/Documents/gestalt/rag_llm_server/data/rag_server.db
+Database connection established.
+Server startup complete.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+
+Okay, the situation remains the same: the diagnostic `print` statements we added to `app/main.py` are *still* not appearing in the output log, even after creating the `__init__.py` files and clearing the cache.
+
+This is highly unusual and suggests something fundamental is preventing the *specific code within your `app/main.py`* from executing as expected when loaded by Uvicorn.
+
+Let's consider these possibilities:
+
+1.  **File Path/Location:** Is it absolutely certain that the `main.py` file you are editing is located at `rag_llm_server/app/main.py`? Could there be another `main.py` somewhere else that Uvicorn is picking up? (e.g., in the root `rag_llm_server/` directory?). The command `uvicorn app.main:app` specifically tells Uvicorn to look for a file named `main.py` inside a package (directory) named `app` and find the `app` object within it.
+    *   **Action:** From the `rag_llm_server` directory, run `ls -l app/main.py`. Does it show a recent modification date corresponding to your edits? Is there a `main.py` in the `rag_llm_server` root?
+
+2.  **Environment/Permissions Issue:** Is there anything unusual about the file permissions for `app/main.py`? (Unlikely, but possible).
+    *   **Action:** Run `ls -l app/main.py` from the root and check the permissions (e.g., `-rw-r--r--`).
+
+3.  **Uvicorn Loading Mechanism / Caching (Beyond `__pycache__`)**: Although we cleared `__pycache__`, maybe there's some other form of caching or Uvicorn/FastAPI is getting stuck on an older version of the code interpretation.
+    *   **Action (Simple Restart):** Stop Uvicorn completely. Restart it one more time: `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+    *   **Action (Run Directly):** Let's try running `main.py` directly using Python to see if the prints appear then. Go to the **root** directory (`rag_llm_server/`) and run:
+        ```bash
+        python app/main.py
+        ```
+        This should execute the `if __name__ == "__main__":` block which *also* contains print statements and the `uvicorn.run()` call. Do the diagnostic prints appear in the terminal *before* Uvicorn tries to start inside that block? What output do you get?
+
+4.  **Python Environment Issue:** Could there be a conflicting library or a corrupted installation in your `cuda_env` conda environment?
+    *   **Action (Verify FastAPI/Uvicorn):** From your activated `cuda_env`, run:
+        ```bash
+        pip show fastapi uvicorn
+        ```
+        Are they installed and showing reasonable versions?
+
+**Focus on Point 3 (Run Directly):** The output from running `python app/main.py` directly will be very informative. It bypasses some of Uvicorn's initial loading process and should definitely execute the print statements within `main.py` if the file is being read correctly by the Python interpreter.
+
+Please try running `python app/main.py` from the `rag_llm_server` directory and share the output.
+
+"that was it - I somehow saved a version of the main.py file in the root directory."
